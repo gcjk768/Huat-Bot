@@ -396,3 +396,13 @@ def test_load_state_survives_corrupt_file(vault, caplog):
     assert "not valid JSON" in caplog.text
     vault.state_path.write_text("[1, 2]")
     assert vault.load_state() == {}
+
+
+def test_number_shaped_strings_are_quoted_for_obsidian():
+    # Obsidian reads YAML 1.2, where an unquoted 0042 is the number 42.
+    from huatbot.vault import dump_frontmatter
+    text = dump_frontmatter({"first": "0042", "numbers": ["0698", "1234"], "draw": 4123, "x": "1e3"})
+    assert "first: '0042'" in text
+    assert "['0698', '1234']" in text
+    assert "draw: 4123" in text
+    assert "x: '1e3'" in text
