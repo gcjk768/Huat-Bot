@@ -12,9 +12,10 @@ ahead), then scored against the real result with the real prize amounts of that 
 The comparison is a crowd of random players. Random player ``i`` buys random set ``i`` of every
 draw (TOTO: one random board, 4D: one random Big $1 number), so after the test window there is a
 distribution of ``n_random`` player totals. A strategy's ``percentile_vs_random`` is the mid rank
-of its total in that distribution (ties count half), and the "Random" row reports the average
-player. None of this changes the odds: every draw is independent, so a strategy that did well in
-the sample is not expected to keep doing so.
+of its total in that distribution (ties count half) and sets the verdict band; the verdict text
+itself says how many players it strictly beat and how many it tied with. The "Random" row is the
+average player: every column is a mean over the random players. None of this changes the odds:
+a strategy that did well in the sample is not expected to keep doing so.
 """
 from __future__ import annotations
 
@@ -43,11 +44,11 @@ TOTO_STRATEGIES: tuple[str, ...] = tuple(strategies.TOTO_PICK_ORDER)  # Hot, Ove
 # its row is the Random baseline (one row per name keeps lookups by pick name unambiguous).
 FOURD_STRATEGIES: tuple[str, ...] = tuple(n for n in strategies.FOURD_PICK_ORDER if n != RANDOM_NAME)
 
-# verdict_for bands (percent of random players beaten).
+# verdict_for bands (mid rank among the random players, ties count half).
 WORSE_BELOW = 5.0
 BETTER_ABOVE = 95.0
 
-RESULT_FORMAT = 1  # bump when result_to_dict changes shape, so old JSON caches are ignored
+RESULT_FORMAT = 2  # bump when result_to_dict or the verdict wording changes, so old JSON caches are ignored
 _EPS = 1e-6  # totals closer than this count as a tie (sums of float prize amounts)
 SKEW_RATIO = 1.25  # explain the Random average when it is more than 1.25 x the median player
 
@@ -55,12 +56,22 @@ SKEW_RATIO = 1.25  # explain the Random average when it is more than 1.25 x the 
 # Verdicts and percentiles
 
 
-def verdict_for(percentile: float | None) -> str:
+def _whole_pct(x: float) -> int:
+    return int(math.floor(float(x) + 0.5))
+
+
+def verdict_for(percentile: float | None, beat: float | None = None, tied: float | None = None) -> str:
     """One plain line for a strategy's place among the random players.
 
-    5 to 95: "No better than random (beat N% of random players)"; above 95: "Beat random in this
-    sample (top N%), but every draw is independent so do not expect it to last"; below 5: "Worse
-    than random in this sample". None (no random players to compare with) says so.
+    ``percentile`` is the mid rank (``percentile_vs_random``) and picks the band. ``beat`` and
+    ``tied`` (optional, 0 to 100) are the shares of random players strictly below and level with
+    the strategy, so the text never counts a tie as a win.
+
+    5 to 95: "No better than random (beat 20% of random players, tied with 54%)" (the tie part only
+    when some players tied; without ``beat`` the mid rank is given as a "percentile rank"); above
+    95: "Beat random in this sample (top N%), not expected to last"; below 5: "Worse than random in
+    this sample". None (no random players to compare with) says so. The independence of draws is
+    stated once in the report's odds note, not here.
     """
     if percentile is None:
         return "Not compared with random players"
@@ -72,11 +83,33 @@ def verdict_for(percentile: float | None) -> str:
         return "Not compared with random players"
     if p > BETTER_ABOVE:
         top = max(1, math.ceil(100.0 - p - 1e-9))  # 97.3 -> top 3%, 99.99 -> top 1%
-        return (f"Beat random in this sample (top {top}%), but every draw is independent "
-                "so do not expect it to last")
+        return f"Beat random in this sample (top {top}%), not expected to last"
     if p < WORSE_BELOW:
         return "Worse than random in this sample"
-    return f"No better than random (beat {int(math.floor(p + 0.5))}% of random players)"
+    try:
+        beat_f = None if beat is None else float(beat)
+    except (TypeError, ValueError):
+        beat_f = None
+    if beat_f is None or not math.isfinite(beat_f):
+        return f"No better than random (percentile rank {_whole_pct(p)} among random players)"
+    text = f"No better than random (beat {_whole_pct(beat_f)}% of random players"
+    try:
+        tied_n = _whole_pct(tied) if tied is not None and math.isfinite(float(tied)) else 0
+    except (TypeError, ValueError):
+        tied_n = 0
+    if tied_n > 0:
+        text += f", tied with {tied_n}%"
+    return text + ")"
+
+
+def shares_vs_random(total: float, random_totals: Any) -> tuple[float, float] | None:
+    """(percent of random players strictly below ``total``, percent level with it), or None."""
+    totals = np.asarray(random_totals, dtype=float).ravel()
+    if totals.size == 0:
+        return None
+    below = int(np.count_nonzero(totals < total - _EPS))
+    equal = int(np.count_nonzero(np.abs(totals - total) <= _EPS))
+    return 100.0 * below / totals.size, 100.0 * equal / totals.size
 
 
 def percentile_vs_random(total: float, random_totals: Any) -> float | None:
@@ -141,6 +174,8 @@ def _strategy_score(name: str, per_draw: np.ndarray, random_totals: np.ndarray) 
     total = float(per_draw.sum())
     # Rounded once so the shown percentile and the verdict always agree.
     pctl = _round_pct(percentile_vs_random(total, random_totals))
+    shares = shares_vs_random(total, random_totals)
+    beat, tied = shares if shares is not None else (None, None)
     return StrategyScore(
         name=name,
         draws=n,
@@ -149,13 +184,14 @@ def _strategy_score(name: str, per_draw: np.ndarray, random_totals: np.ndarray) 
         wins=int(np.count_nonzero(per_draw > 0)),
         best_prize=round(float(per_draw.max()), 2) if n else 0.0,
         percentile_vs_random=pctl,
-        verdict=verdict_for(pctl),
+        verdict=verdict_for(pctl, beat, tied),
     )
 
 
 def _random_score(random_won: np.ndarray) -> StrategyScore:
-    """The average random player: mean total winnings, mean prize draws (rounded) and the median
-    player's best prize, all over the same tested draws."""
+    """The average random player over the same tested draws. Every column is a mean over the
+    random players (total winnings, prize draws rounded to a whole number, best single prize), so
+    the row describes one consistent average player."""
     n_test = int(random_won.shape[0])
     totals = random_won.sum(axis=0)
     wins = np.count_nonzero(random_won > 0, axis=0)
@@ -166,7 +202,7 @@ def _random_score(random_won: np.ndarray) -> StrategyScore:
         cost=n_test * STAKE,
         winnings=round(float(totals.mean()), 2),
         wins=int(round(float(wins.mean()))),
-        best_prize=round(float(np.median(best)), 2),
+        best_prize=round(float(best.mean()), 2) if best.size else 0.0,
         percentile_vs_random=None,
         verdict=RANDOM_VERDICT,
     )
@@ -209,7 +245,9 @@ def _random_note(n_random: int, what: str) -> str:
     if n_random <= 0:
         return "No random players were simulated, so the strategies are not compared with random."
     return (f"Random is the average of {fmt_num(n_random)} random players who each bought {what} "
-            "every draw. A strategy's percentile is the share of those players it beat.")
+            "every draw; each figure in its row is the mean over those players (prize draws "
+            "rounded). A strategy's percentile rank counts the random players it beat plus half "
+            "of those it tied with.")
 
 
 # TOTO

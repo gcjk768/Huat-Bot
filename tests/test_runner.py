@@ -623,3 +623,125 @@ def test_fetch_error_type_is_reported_plainly(tmp_path, toto, fourd):
     assert any("the site is busy (HTTP 503)" in w for w in result.warnings)
     assert len(result.new_draws["4d"]) == 5  # 4D had nothing stored, so it was fetched as well
     assert "toto" not in result.new_draws
+
+
+# fetch trouble, fetch messages and activity rows
+
+
+def test_fetch_trouble_never_puts_a_draw_on_the_skip_list(seeded, toto, fourd):
+    """A 503, a timeout or a WAF 403 is not a reason to give up on a draw for good."""
+    vault = seeded
+    broken = FIRST_TOTO + 5
+    drop_stored_draw(vault, broken)
+    site = fake_site(toto, fourd)
+    good_page = site.pages[toto_result_url(broken)]
+    site.pages[toto_result_url(broken)] = FetchError("the site is busy (HTTP 503 after 6 attempts)", status=503)
+    for i in range(runner.SKIP_AFTER_FAILED_RUNS + 1):
+        result = runner.fetch_data(vault=vault, fetcher=FakeFetcher(site.pages), now=NOW + timedelta(minutes=i))
+        assert any(str(broken) in w and "tried again" in w for w in result.warnings)
+    state = vault.load_state()
+    assert broken not in (state.get("skip") or {}).get("toto", [])
+    assert str(broken) not in (state.get("fetch_failures") or {}).get("toto", {})
+
+    # one real failure (page gone) is counted, later fetch trouble keeps that count unchanged
+    del site.pages[toto_result_url(broken)]
+    runner.fetch_data(vault=vault, fetcher=FakeFetcher(site.pages), now=NOW + timedelta(minutes=10))
+    site.pages[toto_result_url(broken)] = FetchError("the request timed out", status=None)
+    runner.fetch_data(vault=vault, fetcher=FakeFetcher(site.pages), now=NOW + timedelta(minutes=11))
+    assert vault.load_state()["fetch_failures"]["toto"][str(broken)] == 1
+
+    # the site recovers: the draw is fetched and stored
+    site.pages[toto_result_url(broken)] = good_page
+    fetcher = FakeFetcher(site.pages)
+    result = runner.fetch_data(vault=vault, fetcher=fetcher, now=NOW + timedelta(minutes=12))
+    assert toto_result_url(broken) in fetcher.requested
+    assert broken in result.new_draws["toto"]
+    assert broken in set(load_toto(vault.toto_csv)["draw_number"])
+    assert "fetch_failures" not in vault.load_state()
+
+
+def test_draw_type_list_failure_is_a_warning_and_an_error_row(seeded, toto, fourd):
+    vault = seeded
+    site = fake_site(toto, fourd)
+    del site.pages[C.TOTO_HONGBAO_LIST_URL]
+    result = runner.fetch_data(("toto",), vault=vault, fetcher=FakeFetcher(site.pages), now=NOW)
+    assert any("Hongbao draw list could not be used" in w for w in result.warnings)
+    assert any(e == "ERROR" and "Hongbao draw list could not be used" in d for e, d in log_rows(vault))
+    assert all(not contains_dash(w) for w in result.warnings)
+
+
+def test_date_mismatch_is_worded_as_a_date_problem(seeded, toto, fourd):
+    vault = seeded
+    df = load_toto(vault.toto_csv)
+    df.loc[df["draw_number"] == TOTO_LAST_DRAW, "draw_date"] = pd.Timestamp("2026-09-30")
+    save_toto(df, vault.toto_csv)
+    result = runner.fetch_data(("toto",), vault=vault, fetcher=fake_site(toto, fourd), now=NOW)
+    assert any(f"draw {TOTO_LAST_DRAW} is dated" in w and "on the site" in w for w in result.warnings)
+    assert not any("does not match the latest draw on the site" in w for w in result.warnings)
+
+
+def test_prize_rules_check_is_logged(first_run, seeded, toto, fourd):
+    first_vault = first_run[0]
+    assert any(e == "FETCH" and d.startswith("Prize rules: the official prize pages were checked this run")
+               for e, d in log_rows(first_vault))
+    runner.run(dry_run=True, vault=seeded, fetcher=fake_site(toto, fourd), now=NOW + timedelta(hours=1),
+               out=lambda s: None)
+    later = log_rows(seeded)[len(log_rows(first_vault)):]
+    assert any(e == "FETCH" and "reused Data/prize_rules.json" in d for e, d in later)
+
+
+def test_analysis_failures_and_commentary_failures_get_error_rows(seeded, toto, fourd, monkeypatch, no_send):
+    from huatbot import analysis_toto, commentary
+
+    def broken(df):
+        raise ValueError("bad row")
+    monkeypatch.setattr(analysis_toto, "chi_square_numbers", broken)
+    monkeypatch.setenv("COMMENTARY", "claude")
+    monkeypatch.setattr(commentary, "build_commentary", lambda figures: None)
+    result = runner.run(dry_run=True, vault=seeded, fetcher=fake_site(toto, fourd), now=NOW, out=lambda s: None)
+    assert result.ok
+    rows = log_rows(seeded)
+    assert any(e == "ERROR" and "TOTO fairness test could not be worked out" in d for e, d in rows)
+    assert any(e == "ERROR" and "Commentary is turned on but none was added" in d for e, d in rows)
+
+
+def test_no_token_with_a_local_env_file_explains_why(seeded, toto, fourd, no_send, tmp_path, monkeypatch):
+    workdir = tmp_path / "project"
+    workdir.mkdir()
+    (workdir / ".env").write_text("TELEGRAM_BOT_TOKEN=123:abc\nTELEGRAM_CHAT_ID=@huat\n", encoding="utf-8")
+    monkeypatch.chdir(workdir)
+    result = runner.run(vault=seeded, fetcher=fake_site(toto, fourd), now=NOW, out=lambda s: None)
+    assert not result.posted
+    assert any("Telegram is not set up" in w and ".env" in w and "export" in w for w in result.warnings)
+
+
+# posting
+
+
+def test_a_partly_posted_set_is_finished_not_posted_again(seeded, toto, fourd, tg, monkeypatch):
+    vault = seeded
+    real_send = tg.send_message
+    calls = {"n": 0}
+
+    def flaky(token, chat_id, text, parse_mode="HTML", **kw):
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise telegram.TelegramError("Telegram server error (HTTP 502)")
+        return real_send(token, chat_id, text, parse_mode=parse_mode, **kw)
+    monkeypatch.setattr(telegram, "send_message", flaky)
+
+    first = runner.run(vault=vault, fetcher=fake_site(toto, fourd), now=NOW, out=lambda s: None)
+    assert not first.ok and not first.posted
+    assert [s["text"] for s in tg.sent] == first.messages[:1]
+    state = vault.load_state()
+    assert state["posting"]["sent"] == 1 and "last_posted" not in state
+
+    again = runner.run(vault=vault, fetcher=fake_site(toto, fourd), now=NOW + timedelta(minutes=10),
+                       out=lambda s: None)
+    assert again.ok and again.posted
+    assert [s["text"] for s in tg.sent] == first.messages[:1] + again.messages[1:]
+    assert len(tg.sent) == 3  # message 1 was not posted twice
+    state = vault.load_state()
+    assert "posting" not in state
+    assert state["last_posted"] == {"toto": TOTO_LAST_DRAW, "4d": FOURD_LAST_DRAW}
+    assert any(e == "POST" and "remaining 2 messages" in d for e, d in log_rows(vault))

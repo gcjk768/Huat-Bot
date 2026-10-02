@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 from functools import lru_cache
-from math import isfinite
+from math import floor, isfinite
 
 import numpy as np
 import pandas as pd
@@ -170,29 +170,47 @@ def shape_stats(df: pd.DataFrame) -> dict:
 
 
 def format_p(p: float) -> str:
-    """p value for prose. Never scientific notation (that would put a dash in the text)."""
+    """p value for prose. Never scientific notation (that would put a dash in the text).
+
+    Below 0.05 it is rounded down (3 places from 0.01), so a result under the 5% cut never
+    prints as "0.05"; above 0.99 it reads "above 0.99" rather than an impossible "1.00".
+    """
     if not isfinite(p):
         return "n/a"
-    if p >= 0.01:
+    if p > 0.99:
+        return "above 0.99"
+    if p >= 0.05:
         return f"{p:.2f}"
+    if p >= 0.01:
+        return f"{floor(p * 1000) / 1000:.3f}"
     if p >= 0.0001:
         return f"{p:.4f}".rstrip("0")
     return "below 0.0001"
 
 
 def chi_square_numbers(df: pd.DataFrame) -> dict:
-    """Chi square test of the 49 number counts against the even spread 6n / 49."""
-    n = len(df)
+    """Chi square test of the 49 number counts against the even spread 6n / 49.
+
+    Each draw holds 6 distinct numbers (drawn without replacement), so under a fair draw the
+    plain Pearson statistic tends to (49 - 6) / (49 - 1) = 43/48 of a chi square with 48
+    degrees of freedom. It is scaled by 48/43 before the p value is read from chi2(48).
+    Damaged rows (a number out of range or repeated) are left out, and ``n_draws`` counts the
+    draws actually tested.
+    """
     dof = C.TOTO_MAX_NUMBER - 1
+    m = number_matrix(df)
+    valid = m.sum(axis=1) == C.TOTO_PICK
+    n = int(valid.sum())
     if n == 0:
         return {"stat": float("nan"), "dof": dof, "p_value": float("nan"), "n_draws": 0,
                 "verdict": "There are no draws yet, so the spread of numbers cannot be tested."}
-    counts = frequency(df).to_numpy(dtype=float)
+    counts = m[valid].sum(axis=0).astype(float)
     expected = np.full(C.TOTO_MAX_NUMBER, C.TOTO_PICK * n / C.TOTO_MAX_NUMBER)
-    stat, p = stats.chisquare(counts, f_exp=expected)
-    stat, p = float(stat), float(p)
+    raw_stat, _ = stats.chisquare(counts, f_exp=expected)
+    stat = float(raw_stat) * (C.TOTO_MAX_NUMBER - 1) / (C.TOTO_MAX_NUMBER - C.TOTO_PICK)
+    p = float(stats.chi2.sf(stat, dof))
     p_text = format_p(p)
-    p_part = f"p = {p_text}" if p >= 0.0001 else f"p {p_text}"
+    p_part = f"p {p_text}" if p_text.startswith(("above", "below")) else f"p = {p_text}"
     if p < 0.05:
         verdict = (f"The spread of numbers is more uneven than chance usually gives ({p_part}), "
                    "but this alone does not make any number more likely in the next draw.")

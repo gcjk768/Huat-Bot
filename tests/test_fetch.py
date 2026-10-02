@@ -430,3 +430,123 @@ def test_check_site_survives_parser_bugs_and_fetcher_errors(monkeypatch):
     assert F.check_site(Exploding(), out=lines.append) is False
     assert lines[-1].startswith("Summary: 9 of 9 critical checks failed")
     assert_no_dashes(lines)
+
+
+# partly published pages
+
+
+def _without_shares(html: str) -> str:
+    """The result page as it may look right after the draw: numbers out, shares table not yet."""
+    out = re.sub(r"<table class='table table-striped tableWinningShares'>.*?</table>", "", html, flags=re.S)
+    assert out != html
+    return out
+
+
+def test_toto_page_without_shares_table_is_not_stored_and_is_fetched_again(toto_df):
+    site = H.fake_site(toto_df)
+    latest = int(toto_df["draw_number"].max())
+    complete = site.pages[F.toto_result_url(latest)]
+    site.pages[F.toto_result_url(latest)] = _without_shares(complete)
+    df, res = F.update_toto(site, toto_df.iloc[:-1], start_draw=int(toto_df["draw_number"].min()), now=NOW)
+    assert res.new_draws == [] and res.failed_draws == [latest]
+    assert latest not in set(df["draw_number"])
+    assert res.verified is False
+    assert any(f"draw {latest} was not added" in m and "winning shares table" in m for m in res.messages)
+    assert_no_dashes(res.messages)
+    # once the shares are published the next update stores the draw
+    site.pages[F.toto_result_url(latest)] = complete
+    df2, res2 = F.update_toto(site, df, start_draw=int(toto_df["draw_number"].min()), now=NOW)
+    assert res2.new_draws == [latest] and res2.verified
+    assert int(df2.set_index("draw_number").loc[latest, "g7_winners"]) > 0
+
+
+def test_fourd_page_with_a_blank_number_is_not_stored(fourd_df):
+    site = H.fake_site(fourd_df=fourd_df)
+    latest = int(fourd_df["draw_number"].max())
+    row = fourd_df.iloc[-1].copy()
+    row["consolation_10"] = ""
+    site.pages[F.fourd_result_url(latest)] = H.fourd_result_html(row)
+    df, res = F.update_fourd(site, fourd_df.iloc[:-1], history_draws=30, now=NOW)
+    assert res.failed_draws == [latest] and latest not in set(df["draw_number"])
+    assert any("not all 23 winning numbers are on the page yet" in m for m in res.messages)
+
+
+def test_incomplete_stored_newest_draw_is_read_again(toto_df):
+    latest = int(toto_df["draw_number"].max())
+    stored = toto_df.copy()
+    idx = stored.index[stored["draw_number"] == latest][0]
+    for g in range(1, 8):  # saved before the shares were published
+        stored.loc[idx, f"g{g}_share"] = float("nan")
+        stored.loc[idx, f"g{g}_winners"] = 0
+    site = H.fake_site(toto_df)
+    good = site.pages[F.toto_result_url(latest)]
+
+    # still incomplete on the site: the old row is kept and reported, not counted as new or failed
+    site.pages[F.toto_result_url(latest)] = _without_shares(good)
+    df, res = F.update_toto(site, stored, start_draw=int(toto_df["draw_number"].min()), now=NOW)
+    assert site.count(F.toto_result_url(latest)) == 1
+    assert res.new_draws == [] and res.failed_draws == []
+    assert res.verified is False
+    assert any(f"TOTO draw {latest} does not have all its winning shares yet" in m for m in res.messages)
+    assert any("not complete yet" in m for m in res.messages)
+    assert int(df.set_index("draw_number").loc[latest, "g7_winners"]) == 0
+
+    # published: the row is replaced with the full result
+    site.pages[F.toto_result_url(latest)] = good
+    df, res = F.update_toto(site, df, start_draw=int(toto_df["draw_number"].min()), now=NOW)
+    assert res.new_draws == [] and res.verified
+    assert any(f"TOTO draw {latest} was updated with its winning shares" in m for m in res.messages)
+    fixed = df.set_index("draw_number").loc[latest]
+    expected = toto_df.set_index("draw_number").loc[latest]
+    assert int(fixed["g7_winners"]) == int(expected["g7_winners"]) > 0
+    assert len(df) == len(toto_df)
+    assert_no_dashes(res.messages)
+
+
+def test_only_the_newest_stored_draws_are_rechecked(toto_df):
+    stored = toto_df.copy()
+    old = int(stored["draw_number"].iloc[-10])
+    stored.loc[stored["draw_number"] == old, "g7_winners"] = 0
+    site = H.fake_site(toto_df)
+    F.update_toto(site, stored, start_draw=int(toto_df["draw_number"].min()), now=NOW)
+    assert result_urls(site) == []
+
+
+def test_latest_complete_date_waits_for_the_shares_table(toto_df, fourd_df):
+    site = H.fake_site(toto_df, fourd_df)
+    latest = int(toto_df["draw_number"].max())
+    day = toto_df["draw_date"].iloc[-1].date()
+    good = site.pages[F.toto_result_url(latest)]
+    site.pages[F.toto_result_url(latest)] = _without_shares(good)
+    assert F.latest_complete_date(site, "toto") is None
+    site.pages[F.toto_result_url(latest)] = good
+    assert F.latest_complete_date(site, "toto") == day
+    assert F.latest_complete_date(site, "4d") == fourd_df["draw_date"].iloc[-1].date()
+    del site.pages[F.fourd_result_url(int(fourd_df["draw_number"].max()))]
+    assert F.latest_complete_date(site, "4d") is None
+    assert F.latest_complete_date(H.FakeFetcher({}), "toto") is None
+
+
+# draw list sanity
+
+
+def test_draw_list_with_a_stray_huge_number_is_refused(toto_df):
+    site = H.fake_site(toto_df)
+    latest = int(toto_df["draw_number"].max())
+    pairs = list(zip(toto_df["draw_number"].tail(5), toto_df["draw_date"].tail(5)))
+    site.pages[C.TOTO_DRAW_LIST_URL] = H.draw_list_html(pairs + [(latest * 10, pairs[-1][1])])
+    with pytest.raises(FetchError) as info:
+        F.update_toto(site, toto_df.iloc[:-1], start_draw=int(toto_df["draw_number"].min()), now=NOW)
+    assert "draw list looks wrong" in str(info.value) and not DASHES.search(str(info.value))
+    assert result_urls(site) == []
+    # the same on a first fill, judged against the rest of the list
+    with pytest.raises(FetchError):
+        F.update_toto(site, empty_toto(), start_draw=latest - 5, now=NOW)
+    assert result_urls(site) == []
+
+
+def test_draw_list_after_a_long_break_is_accepted(toto_df):
+    # 50 draws behind, but months have passed since the newest stored draw: that is plausible
+    site = H.fake_site(toto_df)
+    df, res = F.update_toto(site, toto_df.iloc[:-50], start_draw=int(toto_df["draw_number"].min()), now=NOW)
+    assert len(res.new_draws) == 50 and res.verified

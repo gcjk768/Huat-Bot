@@ -5,7 +5,7 @@ scheduler loop by a stub that captures the hooks ``serve`` wires up.
 """
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timedelta
 
 import pytest
 
@@ -14,7 +14,7 @@ from huatbot.models import RunResult
 from huatbot.report import SECTION_HEADINGS
 from huatbot.store import load_fourd, load_toto
 from huatbot.textfmt import contains_dash
-from huatbot.vault import Vault
+from huatbot.vault import SG, Vault
 from tests.ctxgen import FOURD_LAST_DRAW, TOTO_LAST_DRAW, fourd_history, toto_history
 from tests.htmlgen import FakeFetcher, fake_site
 
@@ -252,9 +252,10 @@ def test_demo_command(tmp_path, offline, sent, capsys):
 def test_serve_wires_the_scheduler(vault_path, site, sent, monkeypatch, capsys):
     hooks: dict = {}
 
-    def fake_serve(run_fn, check_fn, refresh_fn, notify_fn, log_fn, now_fn, sleep_fn, config=None, max_cycles=None):
+    def fake_serve(run_fn, check_fn, refresh_fn, notify_fn, log_fn, now_fn, sleep_fn, config=None, max_cycles=None,
+                   done_fn=None, games=None):
         hooks.update(run_fn=run_fn, check_fn=check_fn, refresh_fn=refresh_fn, notify_fn=notify_fn,
-                     log_fn=log_fn, now_fn=now_fn, sleep_fn=sleep_fn, config=config)
+                     log_fn=log_fn, now_fn=now_fn, sleep_fn=sleep_fn, config=config, done_fn=done_fn, games=games)
     monkeypatch.setattr(scheduler, "serve", fake_serve)
     monkeypatch.setenv("RUN_AT", "20:15")
 
@@ -276,11 +277,16 @@ def test_serve_wires_the_scheduler(vault_path, site, sent, monkeypatch, capsys):
     log_text = (vault.base / "Logs").glob("*Activity.md")
     assert any("Result not out yet" in p.read_text() for p in log_text)
 
+    assert hooks["games"] == ("toto", "4d")
+    assert hooks["done_fn"]("toto", date(2026, 10, 1)) is False  # nothing stored yet
     result = hooks["run_fn"](games=("toto",))
     assert result.ok and not result.posted
     assert result.new_draws["toto"]
     assert "Message 1 of 3" in capsys.readouterr().out
     assert sent == []
+    # a dry run posts nothing, so the draw is done once it is stored
+    assert hooks["done_fn"]("toto", date(2026, 10, 1)) is True
+    assert hooks["done_fn"]("toto", date(2026, 10, 5)) is False  # Monday's draw is not stored yet
 
 
 def test_serve_notifies_on_telegram_when_set_up(vault_path, site, sent, monkeypatch):
@@ -308,3 +314,64 @@ def test_env_flag(monkeypatch):
     for value, expected in (("1", True), ("true", True), ("Yes", True), ("0", False), ("", False), ("no", False)):
         monkeypatch.setenv("DRY_RUN", value)
         assert cli.env_flag("DRY_RUN") is expected
+
+
+def _capture_serve(monkeypatch) -> dict:
+    hooks: dict = {}
+
+    def fake_serve(run_fn, check_fn, refresh_fn, notify_fn, log_fn, now_fn, sleep_fn, config=None, **kw):
+        hooks.update(run_fn=run_fn, check_fn=check_fn, refresh_fn=refresh_fn, notify_fn=notify_fn,
+                     log_fn=log_fn, config=config, **kw)
+    monkeypatch.setattr(scheduler, "serve", fake_serve)
+    return hooks
+
+
+def test_serve_done_only_after_the_draw_is_posted(vault_path, site, sent, monkeypatch):
+    hooks = _capture_serve(monkeypatch)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:abc")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "42")
+    assert cli.main(["serve", "--vault", str(vault_path)]) == 0
+    real_send = telegram.send_message
+
+    def down(*a, **k):
+        raise telegram.TelegramError("Telegram is down")
+    monkeypatch.setattr(telegram, "send_message", down)
+    result = hooks["run_fn"](games=("toto",))
+    assert not result.posted
+    # stored but not posted: the scheduler must run it again
+    assert hooks["done_fn"]("toto", date(2026, 10, 1)) is False
+    monkeypatch.setattr(telegram, "send_message", real_send)
+    assert hooks["run_fn"](games=("toto",)).posted
+    assert hooks["done_fn"]("toto", date(2026, 10, 1)) is True
+
+
+def test_serve_game_option_limits_the_scheduler(vault_path, site, monkeypatch, capsys):
+    hooks = _capture_serve(monkeypatch)
+    assert cli.main(["serve", "--dry-run", "--game", "toto", "--vault", str(vault_path)]) == 0
+    assert hooks["games"] == ("toto",)
+    assert "Only TOTO is followed." in capsys.readouterr().out
+
+
+def test_serve_dry_run_cycle_runs_once_and_sends_no_notice(vault_path, site, sent, monkeypatch, capsys):
+    """The real scheduler loop with the hooks serve wires up, on a fake clock (Thu 1 Oct 2026,
+    the latest TOTO draw on the fake site): one run, no retry and no notice."""
+    real_serve = scheduler.serve
+    hooks = _capture_serve(monkeypatch)
+    assert cli.main(["serve", "--dry-run", "--vault", str(vault_path)]) == 0
+    clock = {"t": datetime(2026, 10, 1, 10, 0, tzinfo=SG)}
+
+    def sleep(seconds):
+        clock["t"] += timedelta(seconds=seconds)
+    runs, notices = [], []
+
+    def run_fn(games):
+        runs.append((clock["t"], games))
+        return hooks["run_fn"](games=games)
+
+    def notify_fn(text):
+        notices.append(text)
+        return hooks["notify_fn"](text)
+    real_serve(run_fn, hooks["check_fn"], hooks["refresh_fn"], notify_fn, hooks["log_fn"], lambda: clock["t"],
+               sleep, scheduler.SchedulerConfig(), max_cycles=1, done_fn=hooks["done_fn"], games=hooks["games"])
+    assert runs == [(datetime(2026, 10, 1, 19, 30, tzinfo=SG), ("toto",))]
+    assert notices == [] and sent == []

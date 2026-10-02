@@ -266,6 +266,34 @@ def test_share_if_won_unwon_groups():
     assert P.toto_share_if_won(7, row, rules) == 10.0
 
 
+def test_share_if_won_with_winners_but_no_share_amount_is_split():
+    """A missing share cell with winners > 0 must not pay the whole group pool."""
+    rules = PrizeRules()
+    pool = 2_000.0 * 110 / 0.055  # from Group 3
+    row = toto_row(g2_share=np.nan)  # 3 winners, amount not captured
+    assert P.toto_share_if_won(2, row, rules) == pytest.approx(0.08 * pool / 4)
+    row = toto_row(g4_share=np.nan)
+    assert P.toto_share_if_won(4, row, rules) == pytest.approx(0.03 * pool / 301)
+    # Unknown pool: unknown amount, so 0.
+    row = toto_row(g2_share=np.nan, g3_share=np.nan, g3_winners=0, g4_share=np.nan, g4_winners=0)
+    assert P.toto_share_if_won(2, row, rules) == 0.0
+    # The backtest matrix uses the same amounts.
+    row = toto_row(g2_share=np.nan)
+    assert P.toto_group_amounts(row, rules)[2] == pytest.approx(0.08 * pool / 4)
+
+
+def test_ticket_prize_with_winners_but_no_share_amount_is_one_of_the_winners():
+    rules = PrizeRules()
+    row = toto_row(g1_share=np.nan)  # 2 winners, the jackpot is $2,400,000
+    res = P.toto_ticket_prize(WIN, "Ordinary", 1.0, row, rules)
+    assert res.amount == pytest.approx(1_200_000.0)  # split 2 ways, not 3
+    pool = 2_000.0 * 110 / 0.055
+    row = toto_row(g2_share=np.nan)  # 3 winners
+    res = P.toto_ticket_prize(board_with(5, True), "Ordinary", 1.0, row, rules)
+    assert res.groups == {2: 1}
+    assert res.amount == pytest.approx(round(0.08 * pool / 3, 2))
+
+
 def test_share_if_won_uses_rule_overrides_and_string_keys():
     rules = PrizeRules(fixed_prizes={"5": 55.0, "6": 26.0, "7": 11.0})
     row = toto_row()

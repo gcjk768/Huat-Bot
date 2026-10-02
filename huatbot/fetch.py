@@ -5,6 +5,12 @@ Every function takes a fetcher (``http.Fetcher`` or a test double with the same
 Updates are incremental: only draws missing from the frame are fetched, each page is
 checked to be the draw that was asked for, and the newest row is compared with the
 latest draw on the site. One bad page never stops an update; it is reported instead.
+
+A result page that is only partly published (a TOTO page without its winning shares
+table, a 4D page with blank numbers) is not stored: it counts as not out yet, so the next
+run reads it again. Stored rows among the newest draws that are incomplete (saved before
+this check existed) are read again too, and a draw list whose latest draw number is far
+above anything plausible is refused instead of crawled.
 """
 from __future__ import annotations
 
@@ -17,7 +23,7 @@ import pandas as pd
 
 from . import constants as C
 from .http import FetchError
-from .models import NextFourD, NextToto, UpdateResult
+from .models import FOURD_NUMBER_COLUMNS, NextFourD, NextToto, UpdateResult
 from .parse import (
     ParseError,
     parse_draw_list,
@@ -35,6 +41,8 @@ log = logging.getLogger(__name__)
 SG = ZoneInfo(C.SG_TZ_NAME)
 
 MAX_LISTED_FAILURES = 10  # failures named one by one in the messages; the rest are summarised
+RECHECK_NEWEST = 3  # stored draws among the newest this many that are incomplete are fetched again
+LIST_SLACK = 10  # draw numbers allowed above "one draw a day" before a draw list counts as wrong
 RAW_TEXT_LIMIT = 500  # characters of next draw page text kept for the notes
 
 GAME_LABELS = {"toto": "TOTO", "4d": "4D"}
@@ -217,10 +225,63 @@ def latest_on_site(fetcher, game: str) -> tuple[int | None, date | None]:
 
 # result pages
 
+def incomplete_reason(game: str, row: Any) -> str | None:
+    """Why a parsed result (or stored row) is not the full published result, or None.
+
+    TOTO: Group 7 always has thousands of winners, so 0 winners means the winning shares
+    table was not on the page. 4D: every one of the 23 winning numbers must be there.
+    """
+    if game == "toto":
+        try:
+            winners = int(row["g7_winners"])
+        except (KeyError, TypeError, ValueError):
+            winners = 0
+        return None if winners > 0 else "the winning shares table is not on the page yet"
+    for col in FOURD_NUMBER_COLUMNS:
+        try:
+            value = row[col]
+        except KeyError:
+            value = None
+        if value is None or (isinstance(value, float) and pd.isna(value)) or not str(value).strip():
+            return "not all 23 winning numbers are on the page yet"
+    return None
+
+
+def latest_complete_date(fetcher, game: str) -> date | None:
+    """Date of the latest draw on the site, but only once its result page is complete.
+
+    Reads the draw list and the latest result page. Returns None while the page is missing,
+    unreadable or only partly published (see ``incomplete_reason``), so a caller waiting for
+    the result keeps checking instead of storing half a result.
+    """
+    key = str(game).lower()
+    label = GAME_LABELS.get(key, key)
+    number, day = latest_on_site(fetcher, key)
+    if number is None:
+        return None
+    is_toto = key == "toto"
+    try:
+        parsed = (parse_toto_result if is_toto else parse_fourd_result)(
+            fetcher.get((toto_result_url if is_toto else fourd_result_url)(number)))
+    except Exception as exc:
+        log.info("%s draw %s is listed but its result page could not be read yet: %s", label, number, exc)
+        return None
+    if int(parsed["draw_number"]) != int(number):
+        log.info("%s draw %s is listed but its result page shows draw %s", label, number, parsed["draw_number"])
+        return None
+    reason = incomplete_reason(key, parsed)
+    if reason:
+        log.info("%s draw %s is listed but %s", label, number, reason)
+        return None
+    return day or _as_date(parsed.get("draw_date"))
+
 
 def _fetch_results(fetcher, numbers: list[int], url_fn: Callable[[int], str],
-                   parse_fn: Callable[[str], dict], fetched_at: str) -> tuple[list[dict], list[tuple[int, str]]]:
-    """Fetch and parse result pages. Returns (parsed rows, [(draw number, plain reason)])."""
+                   parse_fn: Callable[[str], dict], fetched_at: str,
+                   incomplete: Callable[[dict], str | None] | None = None,
+                   ) -> tuple[list[dict], list[tuple[int, str]]]:
+    """Fetch and parse result pages. Returns (parsed rows, [(draw number, plain reason)]).
+    A page ``incomplete`` finds a reason against is a failure (not out yet), not a row."""
     if not numbers:
         return [], []
     urls = {url_fn(n): n for n in numbers}
@@ -251,9 +312,39 @@ def _fetch_results(fetcher, numbers: list[int], url_fn: Callable[[int], str],
         if int(parsed["draw_number"]) != int(n):
             failures.append((n, f"page showed draw {parsed['draw_number']} instead"))
             continue
+        reason = incomplete(parsed) if incomplete is not None else None
+        if reason:
+            failures.append((n, reason))
+            continue
         parsed["fetched_at"] = fetched_at
         rows.append(parsed)
     return rows, failures
+
+
+def _check_latest(label: str, draws: list[tuple[int, date | None]], df: pd.DataFrame, now: datetime) -> None:
+    """Refuse a draw list whose latest draw number cannot be right (one stray or garbled
+    option would otherwise make the bot request thousands of pages that do not exist).
+
+    There is at most one draw a day, so the latest number may be at most one per day above
+    the newest stored draw (or the next entry of the list), plus ``LIST_SLACK``.
+    """
+    latest, latest_date = draws[0]
+    if not df.empty:
+        newest = df.sort_values("draw_number").iloc[-1]
+        base, base_date = int(newest["draw_number"]), _as_date(newest["draw_date"])
+        what = f"the newest stored draw is {base}"
+    elif len(draws) > 1:
+        base, base_date = draws[1]
+        what = f"the next draw in the list is {base}"
+    else:
+        return
+    if latest <= base:
+        return
+    end = latest_date or now.date()
+    days = max((end - base_date).days, 0) if base_date is not None else 0
+    if latest > base + days + LIST_SLACK:
+        raise FetchError(f"the {label} draw list looks wrong: it lists draw {latest} but {what}, so nothing "
+                         "was fetched")
 
 
 def _update(game: str, fetcher, df: pd.DataFrame, wanted: Callable[[int], range], skip,
@@ -268,6 +359,7 @@ def _update(game: str, fetcher, df: pd.DataFrame, wanted: Callable[[int], range]
 
     draws = _read_draw_list(fetcher, C.TOTO_DRAW_LIST_URL if is_toto else C.FOURD_DRAW_LIST_URL, label)
     latest, latest_date = draws[0]
+    _check_latest(label, draws, df, now)
     result.latest_on_site = latest
     when = f" on {_fmt_date(latest_date)}" if latest_date else ""
     result.messages.append(f"{label}: the latest draw on the site is {latest}{when}.")
@@ -277,12 +369,17 @@ def _update(game: str, fetcher, df: pd.DataFrame, wanted: Callable[[int], range]
     window = list(wanted(latest))
     skipped = [n for n in window if n in skip_set and n not in have]
     missing = [n for n in window if n not in have and n not in skip_set]
+    # Stored newest draws saved while their page was only partly published are read again.
+    stored = df.set_index("draw_number") if have else None
+    recheck = [n for n in window[-RECHECK_NEWEST:]
+               if n in have and n not in skip_set and incomplete_reason(game, stored.loc[n])]
 
     rows, failures = _fetch_results(
-        fetcher, missing,
+        fetcher, missing + recheck,
         toto_result_url if is_toto else fourd_result_url,
         parse_toto_result if is_toto else parse_fourd_result,
         now.isoformat(timespec="seconds"),
+        lambda parsed: incomplete_reason(game, parsed),
     )
     if rows:
         new = pd.DataFrame(rows)
@@ -291,15 +388,24 @@ def _update(game: str, fetcher, df: pd.DataFrame, wanted: Callable[[int], range]
         new = normalise(new)
         df = new if df.empty else normalise(pd.concat([df, new], ignore_index=True))
 
-    result.new_draws = sorted(int(r["draw_number"]) for r in rows)
+    repaired = sorted(int(r["draw_number"]) for r in rows if int(r["draw_number"]) in recheck)
+    still = sorted(n for n, _ in failures if n in recheck)
+    failures = [(n, reason) for n, reason in failures if n not in recheck]
+    result.new_draws = sorted(int(r["draw_number"]) for r in rows if int(r["draw_number"]) not in recheck)
     result.failed_draws = sorted(n for n, _ in failures)
+    what = "winning shares" if is_toto else "winning numbers"
+    for n in repaired:
+        result.messages.append(f"{label} draw {n} was updated with its {what}.")
+    for n in still:
+        result.messages.append(f"{label} draw {n} does not have all its {what} yet, it will be read again on "
+                               "the next run.")
 
     if result.new_draws:
         count = len(result.new_draws)
         result.messages.append(
             f"{label}: {count} new draw{'s' if count != 1 else ''} added ({_draw_span(result.new_draws)})."
         )
-    elif not missing:
+    elif not missing and not recheck:
         result.messages.append(f"{label}: no missing draws, nothing new to fetch.")
     if skipped:
         result.messages.append(
@@ -339,6 +445,10 @@ def _verify(label: str, df: pd.DataFrame, result: UpdateResult, latest_date: dat
             f"{label}: draw {latest} is dated {_fmt_date(newest_date)} in the data but "
             f"{_fmt_date(latest_date)} on the site, please check it."
         )
+    elif incomplete_reason(result.game, newest):
+        result.verified = False
+        what = "winning shares" if result.game == "toto" else "winning numbers"
+        result.messages.append(f"{label}: draw {latest} is on the site but its {what} are not complete yet.")
     else:
         result.verified = True
         result.messages.append(

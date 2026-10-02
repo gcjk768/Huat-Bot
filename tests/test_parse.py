@@ -265,13 +265,41 @@ def test_toto_result_duplicate_numbers_rejected():
         P.parse_toto_result(H.toto_result_html(row))
 
 
-def test_toto_result_without_shares_table_gives_nan_and_zero():
+def test_toto_result_without_shares_table_raises():
+    # Not published yet or a changed layout: the draw must not be stored as "no winners".
     row = synth_toto(n_draws=5).iloc[-1]
     html = H.toto_result_html(row).replace("tableWinningShares", "tableSomethingElse")
-    r = P.parse_toto_result(html)
-    assert all(math.isnan(r[f"g{g}_share"]) and r[f"g{g}_winners"] == 0 for g in range(1, 8))
+    with pytest.raises(P.ParseError, match="winning shares"):
+        P.parse_toto_result(html)
     html = H.toto_result_html(row).replace("class='jackpotPrize'", "class='other'")
     assert math.isnan(P.parse_toto_result(html)["jackpot"])
+
+
+def test_toto_result_with_unpublished_shares_raises():
+    row = synth_toto(n_draws=5).iloc[-1].copy()
+    for g in range(1, 8):
+        row[f"g{g}_share"] = float("nan")
+        row[f"g{g}_winners"] = 0  # every cell renders as "-"
+    with pytest.raises(P.ParseError, match="not published yet"):
+        P.parse_toto_result(H.toto_result_html(row))
+
+
+def test_toto_result_with_missing_group_rows_raises():
+    row = synth_toto(n_draws=5).iloc[-1]
+    html = H.toto_result_html(row).replace("<td>Group 7</td>", "<td>Something else</td>")
+    with pytest.raises(P.ParseError):
+        P.parse_toto_result(html)
+
+
+def test_toto_result_group_label_in_a_th_cell_is_read():
+    row = synth_toto(n_draws=5).iloc[-1]
+    html = H.toto_result_html(row)
+    for g in range(1, 8):
+        html = html.replace(f"<td>Group {g}</td>", f"<th>Group {g}</th>")
+    r = P.parse_toto_result(html)
+    for g in range(1, 8):
+        assert r[f"g{g}_winners"] == int(row[f"g{g}_winners"])
+    assert r["g7_share"] == float(row["g7_share"])
 
 
 # 4D result pages
@@ -306,6 +334,38 @@ def test_fourd_blank_cells_become_empty_strings():
     r = P.parse_fourd_result(H.fourd_result_html(row))
     assert r["starter_10"] == "" and r["consolation_3"] == "" and r["third"] == ""
     assert r["first"] == row["first"]
+
+
+def test_fourd_renamed_prize_sections_raise(fixture_html):
+    html = fixture_html("fourd_result.html")
+    for cls in ("tbodyStarterPrizes", "tbodyConsolationPrizes"):
+        with pytest.raises(P.ParseError, match="not found"):
+            P.parse_fourd_result(html.replace(cls, "tbodySomethingElse"))
+
+
+def test_fourd_extra_label_and_spacer_cells_do_not_shift_numbers():
+    row = synth_fourd(n_draws=3).iloc[-1]
+    html = H.fourd_result_html(row)
+    noisy = html.replace("<tbody class='tbodyStarterPrizes'>",
+                         "<tbody class='tbodyStarterPrizes'><tr><td>Starter Prizes</td><td> </td></tr>")
+    r = P.parse_fourd_result(noisy)
+    assert [r[f"starter_{i}"] for i in range(1, 11)] == [row[f"starter_{i}"] for i in range(1, 11)]
+
+
+def test_fourd_wrong_count_or_long_number_raises():
+    row = synth_fourd(n_draws=3).iloc[-1]
+    html = H.fourd_result_html(row)
+    nine = html.replace(f"<td>{row['starter_10']}</td>", "", 1)
+    with pytest.raises(P.ParseError, match="expected 10"):
+        P.parse_fourd_result(nine)
+    longer = html.replace(f"<td>{row['consolation_1']}</td>", "<td>12345</td>", 1)
+    with pytest.raises(P.ParseError, match="4 digit"):
+        P.parse_fourd_result(longer)
+    all_blank = row.copy()
+    for i in range(1, 11):
+        all_blank[f"starter_{i}"] = ""
+    with pytest.raises(P.ParseError):
+        P.parse_fourd_result(H.fourd_result_html(all_blank))
 
 
 def test_fourd_missing_draw_number_raises(fixture_html):
@@ -443,6 +503,19 @@ def test_toto_prize_structure_plain_text_paragraphs():
     assert r["min_group1"] == 1_000_000.0
 
 
+@pytest.mark.parametrize("amount", ["$1m", "S$1M", "$1.0 mil", "$1 million", "$1,000,000"])
+def test_toto_prize_structure_minimum_short_forms(amount):
+    html = (f"<p>Group 1 gets 38% of the Prize Pool, at least {amount}.</p>"
+            "<p>Group 2 gets 8%.</p><p>Group 3 gets 5.5%.</p><p>Group 4 gets 3%.</p>")
+    assert P.parse_toto_prize_structure(html)["min_group1"] == 1_000_000.0
+
+
+def test_toto_prize_structure_implausible_minimum_is_not_used():
+    html = ("<p>Group 1 gets 38% of the Prize Pool, minimum $1.</p>"
+            "<p>Group 2 gets 8%.</p><p>Group 3 gets 5.5%.</p><p>Group 4 gets 3%.</p>")
+    assert P.parse_toto_prize_structure(html)["min_group1"] is None
+
+
 def test_fourd_prize_structure_fixture(fixture_html):
     r = P.parse_fourd_prize_structure(fixture_html("fourd_prize_structure.html"))
     assert r["big"] == C.FOURD_PRIZES["big"]
@@ -495,3 +568,19 @@ def test_page_text_drops_scripts_and_styles():
 def test_next_draw_impossible_date_is_none():
     info = P.parse_toto_next_draw("<p>Next Jackpot $1,000,000 est</p><p>Next Draw Mon, 31 Feb 2026 , 6.30pm</p>")
     assert info["draw_datetime"] is None and info["jackpot_estimate"] == 1_000_000
+
+
+def test_check_site_fails_when_the_result_layout_changes():
+    """A renamed shares table or prize section must make check site FAIL, not PASS with 0 groups."""
+    from huatbot.fetch import check_site
+
+    site = H.fake_site(synth_toto(n_draws=20), synth_fourd(n_draws=20))
+    assert check_site(site, out=lambda s: None) is True
+    for url, html in list(site.pages.items()):
+        if isinstance(html, str):
+            site.pages[url] = (html.replace("tableWinningShares", "tableSomethingElse")
+                               .replace("tbodyStarterPrizes", "tbodySomethingElse"))
+    lines: list[str] = []
+    assert check_site(site, out=lines.append) is False
+    assert any(line.startswith("FAIL  TOTO latest result page") and "winning shares" in line for line in lines)
+    assert any(line.startswith("FAIL  4D latest result page") and "starter" in line for line in lines)

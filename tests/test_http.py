@@ -297,3 +297,69 @@ def test_default_session_is_per_thread_and_closed():
     with fetcher:
         pass
     assert fetcher._own_sessions == []
+
+
+def test_get_many_reuses_worker_sessions_across_batches(monkeypatch):
+    """A long running serve calls get_many many times: the sessions must not pile up."""
+    made = []
+
+    class CountingSession:
+        def __init__(self):
+            self.headers = {}
+            self.closed = False
+            made.append(self)
+
+        def get(self, url, headers=None, timeout=None):
+            return FakeResponse(200, f"<html>{url}</html>")
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(H.requests, "Session", CountingSession)
+    fetcher = Fetcher(max_workers=2, sleep=lambda s: None)
+    urls = ["https://example.invalid/a", "https://example.invalid/b"]
+    for _ in range(20):
+        out = fetcher.get_many(urls)
+        assert all(out[u] == f"<html>{u}</html>" for u in urls)
+    assert len(fetcher._own_sessions) <= 3 and len(made) <= 3
+    fetcher.close()
+    assert fetcher._own_sessions == [] and fetcher._pool is None
+    assert all(s.closed for s in made)
+    # a closed fetcher still works: a fresh pool is started
+    assert fetcher.get_many(urls[:1]) == {urls[0]: f"<html>{urls[0]}</html>"}
+    fetcher.close()
+
+
+def test_get_many_stops_early_when_the_site_keeps_failing():
+    urls = [f"https://example.invalid/down{i}" for i in range(40)]
+    session = FakeSession(default=503)
+    fetcher, _ = make(session, pause=0.0, max_workers=1, max_retries=1)
+    out = fetcher.get_many(urls)
+    assert list(out) == urls
+    assert all(isinstance(v, FetchError) and v.transient for v in out.values())
+    # 10 pages failed after their retries, the other 30 were never requested
+    assert len({u for u, _, _ in session.calls}) == H.STOP_AFTER_FAILURES
+    assert len(session.calls) == H.STOP_AFTER_FAILURES * 2
+    skipped = out[urls[-1]]
+    assert "not tried" in str(skipped) and "-" not in str(skipped)
+    # the next batch starts afresh (the site may be back)
+    session.default = (200, "<html>back</html>")
+    assert fetcher.get_many(urls[:3]) == {u: "<html>back</html>" for u in urls[:3]}
+
+
+def test_get_many_does_not_stop_for_scattered_failures():
+    urls = [f"https://example.invalid/s{i}" for i in range(40)]
+    scripts = {u: [503] for i, u in enumerate(urls) if i % 3 == 0}  # every third page is down
+    session = FakeSession(scripts)
+    fetcher, _ = make(session, pause=0.0, max_workers=1, max_retries=0)
+    out = fetcher.get_many(urls)
+    assert sum(isinstance(v, FetchError) for v in out.values()) == 14
+    assert len({u for u, _, _ in session.calls}) == 40
+
+
+def test_not_found_is_not_a_transient_failure():
+    session = FakeSession({URL: [404]})
+    fetcher, _ = make(session, pause=0.0)
+    with pytest.raises(FetchError) as info:
+        fetcher.get(URL)
+    assert info.value.transient is False

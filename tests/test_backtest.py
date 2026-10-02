@@ -84,19 +84,41 @@ def real_fourd(fourd_df):
 
 
 @pytest.mark.parametrize("p, expected", [
-    (50.0, "No better than random (beat 50% of random players)"),
-    (5.0, "No better than random (beat 5% of random players)"),
-    (95.0, "No better than random (beat 95% of random players)"),
-    (43.4, "No better than random (beat 43% of random players)"),
-    (97.3, "Beat random in this sample (top 3%), but every draw is independent so do not expect it to last"),
-    (99.99, "Beat random in this sample (top 1%), but every draw is independent so do not expect it to last"),
-    (100.0, "Beat random in this sample (top 1%), but every draw is independent so do not expect it to last"),
+    (50.0, "No better than random (percentile rank 50 among random players)"),
+    (5.0, "No better than random (percentile rank 5 among random players)"),
+    (95.0, "No better than random (percentile rank 95 among random players)"),
+    (43.4, "No better than random (percentile rank 43 among random players)"),
+    (97.3, "Beat random in this sample (top 3%), not expected to last"),
+    (99.99, "Beat random in this sample (top 1%), not expected to last"),
+    (100.0, "Beat random in this sample (top 1%), not expected to last"),
     (4.9, "Worse than random in this sample"),
     (0.0, "Worse than random in this sample"),
 ])
 def test_verdict_for_bands(p, expected):
     assert BT.verdict_for(p) == expected
     assert not contains_dash(BT.verdict_for(p))
+    # The odds note says once that every draw is independent; verdicts never repeat it.
+    assert "independent" not in BT.verdict_for(p)
+
+
+@pytest.mark.parametrize("p, beat, tied, expected", [
+    (43.4, 43.4, 0.0, "No better than random (beat 43% of random players)"),
+    (40.0, 30.0, 20.0, "No better than random (beat 30% of random players, tied with 20%)"),
+    (27.0, 0.0, 54.0, "No better than random (beat 0% of random players, tied with 54%)"),
+    (99.0, 98.0, 2.0, "Beat random in this sample (top 1%), not expected to last"),
+])
+def test_verdict_for_counts_ties_separately(p, beat, tied, expected):
+    assert BT.verdict_for(p, beat, tied) == expected
+
+
+def test_zero_winnings_strategy_does_not_claim_to_beat_tied_players():
+    """About half of random 4D players win nothing; a $0 strategy beat none of them."""
+    totals = [0.0] * 54 + [5.0] * 20 + [100.0] * 26
+    score = BT._strategy_score("Repeat Winner", np.zeros(300), np.array(totals))
+    assert score.percentile_vs_random == 27.0  # mid rank still sets the band
+    assert score.verdict == "No better than random (beat 0% of random players, tied with 54%)"
+    assert BT.shares_vs_random(5.0, totals) == pytest.approx((54.0, 20.0))
+    assert BT.shares_vs_random(5.0, []) is None
 
 
 @pytest.mark.parametrize("p", [None, float("nan"), "junk"])
@@ -193,7 +215,10 @@ def test_toto_result_shape(real_toto, toto_df):
         assert not contains_dash(s.verdict)
     for s in r.scores[:-1]:
         assert 0 <= s.percentile_vs_random <= 100
-        assert s.verdict == BT.verdict_for(s.percentile_vs_random)
+        band = BT.verdict_for(s.percentile_vs_random).split(" (")[0]
+        assert s.verdict.split(" (")[0] == band  # the mid rank picks the band
+        if band == "No better than random":
+            assert s.verdict.startswith("No better than random (beat ")  # strict share, ties apart
     rnd = r.scores[-1]
     assert rnd.percentile_vs_random is None and rnd.verdict == "Baseline"
     assert r.notes and not any(contains_dash(n) for n in r.notes)
@@ -239,6 +264,8 @@ def test_toto_random_baseline_is_average_player(monkeypatch, toto_df, rules):
     assert rnd.name == "Random" and rnd.cost == n
     assert rnd.winnings == pytest.approx(totals.mean(), abs=0.01)
     assert rnd.wins == round(float((won > 0).sum(axis=0).mean()))
+    # One statistic for the whole row: the best prize is the mean of each player's best too.
+    assert rnd.best_prize == pytest.approx(won.max(axis=0).mean(), abs=0.01)
     for s in r.scores[:-1]:
         assert s.percentile_vs_random == pytest.approx(
             round(BT.percentile_vs_random(s.winnings, totals), 1), abs=0.051)
@@ -398,6 +425,9 @@ def test_fourd_random_big_return_near_0659(monkeypatch, fourd_df, rules):
     rnd = r.scores[-1]
     assert rnd.name == "Random" and rnd.verdict == "Baseline" and rnd.percentile_vs_random is None
     assert 0.5 <= rnd.return_per_dollar <= 0.82
+    # The row is one average player: a prize draw comes with a best prize above $0.
+    assert rnd.wins >= 1 and rnd.best_prize > 0
+    assert any("mean over those players" in n and "tied with" in n for n in r.notes)
 
 
 def test_fourd_real_run_shape(real_fourd, fourd_df):

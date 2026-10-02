@@ -2,13 +2,15 @@
 from __future__ import annotations
 
 import re
+from datetime import date, datetime
 from html.parser import HTMLParser
 
+import pandas as pd
 import pytest
 
+from huatbot import buysignal, report, suggest
 from huatbot import constants as C
-from huatbot import report, suggest
-from huatbot.models import PrizeRules
+from huatbot.models import NextToto, PrizeRules
 from huatbot.store import empty_ledger, fourd_numbers, toto_numbers
 from huatbot.textfmt import contains_dash, has_prose_dashes
 from huatbot.tickets import ledger_totals
@@ -454,3 +456,74 @@ def test_backtest_summary_groups_verdicts(ctx):
     line = report.backtest_summary(ctx.toto_backtest, "toto")
     assert line.startswith("TOTO, last 20 draws:")
     assert report.backtest_summary(None, "toto") is None
+
+
+# Stale next draw info and stale results
+
+
+def _sg(y, m, d, hh=19, mm=30):
+    return datetime(y, m, d, hh, mm, tzinfo=report.SG)
+
+
+def test_next_draw_later_today_is_still_the_next_draw(ctx):
+    # Mon 5 Oct at 7.30pm, Monday's result not stored yet: Monday is still the next draw.
+    monday = variant(ctx, now=_sg(2026, 10, 5))
+    nd = report.next_draw(monday, "toto")
+    assert str(nd.day) == "2026-10-05" and nd.number == 4124 and not nd.stale and not nd.from_schedule
+
+
+def test_next_draw_page_showing_the_draw_just_held_is_not_used(ctx):
+    # The 7.30pm run on Thu 1 Oct: the next draw page still shows tonight's draw (already stored).
+    held = NextToto(draw_datetime=_sg(2026, 10, 1, 18, 30), jackpot_estimate=5_000_000.0, draw_type="normal",
+                    draw_type_hint=None)
+    signal = buysignal.buy_signal(held, ctx.toto, ctx.settings, ctx.rules)
+    assert signal.jackpot == 5_000_000.0  # what the runner computed from the stale page
+    stale = variant(ctx, next_toto=held, buy_signal=signal)
+    assert not report.next_info_is_current(stale, "toto")
+    msg = report.telegram_messages(stale)[1]
+    assert "$5,000,000" not in msg
+    assert "Estimated jackpot: not available yet" in msg and "Return per $1: not available" in msg
+    assert "Buy signal: <b>MEDIUM</b>" in msg
+    assert "Mon 5 Oct 2026, 6.30pm (regular schedule, not announced yet)" in msg
+    assert "$5,000,000" not in report.full_report(stale)
+
+
+def test_stored_results_a_week_old_are_marked_not_up_to_date(ctx):
+    # The site could not be read for a week: stored results end Thu 1 Oct, it is now Fri 9 Oct,
+    # and the stored next draws (Mon 5 Oct, Sat 3 Oct) are past.
+    week = variant(ctx, now=_sg(2026, 10, 9))
+    today = date(2026, 10, 9)
+    for game in ("toto", "4d"):
+        nd = report.next_draw(week, game)
+        assert nd.stale and nd.number is None and nd.day >= today
+        assert "results are not up to date" in nd.when_text
+    assert str(report.next_draw(week, "toto").day) == "2026-10-12"  # Monday
+    assert str(report.next_draw(week, "4d").day) == "2026-10-10"  # Saturday
+    msgs = report.telegram_messages(week)
+    assert "Results not up to date" in msgs[0] and "TOTO draw 4123 and 4D draw 5432" in msgs[0]
+    assert "Mon 5 Oct" not in msgs[1] and "Sat 3 Oct" not in msgs[1]
+    assert report.money(ctx.next_toto.jackpot_estimate) not in msgs[1]
+    assert "Results not up to date" in report.full_report(week)
+    for msg in msgs:
+        assert_valid_message(msg)
+    assert "Results not up to date" not in report.telegram_messages(ctx)[0]
+
+
+def test_message3_does_not_suggest_buying_beyond_the_plan(ctx):
+    msg = report.telegram_messages(ctx)[2]
+    assert "if the budget allows" not in msg
+    bought = {ln.label for ln in ctx.toto_plan.lines}
+    if any(p.name not in bought for p in ctx.toto_picks):
+        assert "Not in the plan (details in the report)" in msg
+
+
+def test_message1_mentions_tickets_dated_on_a_day_without_a_draw(ctx):
+    ledger = ctx.ledger.copy()
+    extra = ledger.iloc[[0]].copy()
+    extra["status"] = "no_draw"
+    extra["cost"] = 3.0
+    extra["ticket_id"] = "no-draw-ticket"
+    ledger = pd.concat([ledger, extra], ignore_index=True)
+    msg = report.telegram_messages(variant(ctx, ledger=ledger, ledger_totals=ledger_totals(ledger)))[0]
+    assert "1 ticket ($3) has no draw on its date and still counts as spent. Check the date in Tickets.md." in msg
+    assert "no draw on" not in report.telegram_messages(ctx)[0]

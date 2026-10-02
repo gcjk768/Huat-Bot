@@ -149,7 +149,7 @@ def test_chi_square_even_spread_is_chance():
     assert res["stat"] == pytest.approx(0.0)
     assert res["p_value"] == pytest.approx(1.0)
     assert res["dof"] == 48 and res["n_draws"] == 49
-    assert res["verdict"] == ("The spread of numbers is consistent with pure chance (p = 1.00), "
+    assert res["verdict"] == ("The spread of numbers is consistent with pure chance (p above 0.99), "
                               "so hot and cold numbers are just noise.")
 
 
@@ -157,7 +157,8 @@ def test_chi_square_lopsided_spread_is_flagged_but_not_predictive():
     df = frame([[1, 2, 3, 4, 5, 6]] * 100)
     res = A.chi_square_numbers(df)
     expected = stats.chisquare(A.frequency(df).to_numpy(), np.full(49, 600 / 49))
-    assert res["stat"] == pytest.approx(expected.statistic)
+    # 6 distinct numbers per draw: the Pearson statistic is rescaled by 48/43 to a true chi2(48).
+    assert res["stat"] == pytest.approx(expected.statistic * 48 / 43)
     assert res["p_value"] < 0.05
     assert "unusual" in res["verdict"] or "more uneven" in res["verdict"]
     assert "does not make any number more likely in the next draw" in res["verdict"]
@@ -169,15 +170,54 @@ def test_chi_square_on_synthetic_history(toto_df):
     res = A.chi_square_numbers(toto_df)
     assert res["n_draws"] == len(toto_df) and res["dof"] == 48
     assert 0.0 <= res["p_value"] <= 1.0
-    assert re.search(r"\(p = \d\.\d\d\)|\(p = 0\.\d+\)|\(p below 0\.0001\)", res["verdict"])
+    assert re.search(r"\(p = \d\.\d\d\)|\(p = 0\.\d+\)|\(p below 0\.0001\)|\(p above 0\.99\)",
+                     res["verdict"])
     assert res["verdict"].endswith(".") and res["verdict"].count(".") <= 3
     assert not DASHES.search(res["verdict"])
+
+
+def test_chi_square_is_calibrated_for_draws_without_replacement():
+    """Under a fair draw the corrected statistic averages about 48 and about 5% of histories
+    fall below p = 0.05 (the plain Pearson test gave about 43 and 1.25%)."""
+    rng = np.random.default_rng(11)
+    stats_, ps = [], []
+    for _ in range(300):
+        keys = rng.random((300, 49))
+        draws = np.argpartition(keys, 5, axis=1)[:, :6] + 1
+        res = A.chi_square_numbers(frame(draws.tolist()))
+        stats_.append(res["stat"])
+        ps.append(res["p_value"])
+    assert 46.0 <= np.mean(stats_) <= 50.0
+    assert 0.02 <= np.mean(np.array(ps) < 0.05) <= 0.09
+
+
+def test_chi_square_known_values():
+    # The plain statistic 60.0 is 67.0 after the 48/43 correction: p about 0.036, not 0.11.
+    assert stats.chi2.sf(60.0 * 48 / 43, 48) == pytest.approx(0.0364, abs=0.001)
+
+
+def test_chi_square_skips_damaged_rows_instead_of_failing():
+    draws = [[(6 * i + k) % 49 + 1 for k in range(6)] for i in range(49)]
+    damaged = draws + [[0, 2, 3, 4, 5, 6], [7, 7, 8, 9, 10, 11]]  # out of range, repeated number
+    res = A.chi_square_numbers(frame(damaged))
+    assert res["n_draws"] == 49
+    assert res["stat"] == pytest.approx(0.0) and res["p_value"] == pytest.approx(1.0)
 
 
 def test_chi_square_empty_history():
     res = A.chi_square_numbers(frame([]))
     assert res["n_draws"] == 0 and np.isnan(res["p_value"])
     assert not DASHES.search(res["verdict"])
+
+
+def test_format_p_never_rounds_across_the_cut_or_to_one():
+    assert A.format_p(0.0499) == "0.049"  # under 5%, never shown as 0.05
+    assert A.format_p(0.045) == "0.045"
+    assert A.format_p(0.012) == "0.012"
+    assert A.format_p(0.05) == "0.05"
+    assert A.format_p(0.9989) == "above 0.99"
+    assert A.format_p(1.0) == "above 0.99"
+    assert A.format_p(0.99) == "0.99"
 
 
 def test_format_p_never_uses_scientific_notation():

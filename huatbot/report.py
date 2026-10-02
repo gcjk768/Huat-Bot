@@ -14,8 +14,9 @@ Text that comes from other modules (strategy reasons, plan notes, verdicts, the 
 passed through ``textfmt.remove_dashes`` as a last line of defence.
 
 A few view helpers live here because ``notes`` shares them: ``latest_row``, ``next_draw``,
-the note names (``draw_note_name``, ``report_note_name`` ...) and the markdown blocks for a
-draw result, a purchase plan and a backtest scoreboard.
+the note names and links (``draw_note_name``, ``draw_note_rel``, ``note_link``,
+``report_note_name`` ...) and the markdown blocks for a draw result, a purchase plan and a
+backtest scoreboard.
 """
 from __future__ import annotations
 
@@ -29,6 +30,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
+from . import buysignal
 from . import constants as C
 from . import prizes
 from .analysis_fourd import bet_type_value
@@ -68,6 +70,7 @@ SECTION_HEADINGS = (
 )
 
 GAME_NAMES = {"toto": "TOTO", "4d": "4D"}
+DRAW_FOLDERS = {"toto": "Draws/TOTO", "4d": "Draws/4D"}  # one note per draw, in the bot folder
 DRAW_TYPE_NAMES = {"normal": "Normal", "cascade": "Cascade", "hongbao": "Hongbao", "special": "Special"}
 EV_PARTS = (
     ("g1", "Group 1"),
@@ -206,38 +209,70 @@ class NextDraw:
     day: date | None
     when: datetime | None  # Singapore time
     from_schedule: bool = False  # True when the date was worked out from the regular draw days
+    stale: bool = False  # True when stored results are behind: draws were held after the newest one
 
     @property
     def when_text(self) -> str:
         if self.when is None:
             return "not announced yet"
         text = fmt_datetime(self.when)
+        if self.stale:
+            return f"{text} (worked out from the regular schedule, results are not up to date)"
         return f"{text} (regular schedule, not announced yet)" if self.from_schedule else text
+
+
+def _last_stored(ctx: Context, game: str) -> tuple[int, date | None]:
+    row = latest_row(ctx.toto if game == "toto" else ctx.fourd)
+    if row is None:
+        return 0, None
+    return as_int(field(row, "draw_number"), 0), as_date(field(row, "draw_date"))
+
+
+def next_info_is_current(ctx: Context, game: str) -> bool:
+    """False when the next draw page info in the context is about a draw already held: its
+    date is not after the newest stored draw (the page still shows the draw just held) or it
+    is before today (stored info from an earlier run while the site could not be read). Its
+    date, jackpot and draw type must not be used then. True when there is no such date."""
+    info = ctx.next_toto if game == "toto" else ctx.next_fourd
+    when = to_sg(getattr(info, "draw_datetime", None))
+    if when is None:
+        return True
+    _, last_day = _last_stored(ctx, game)
+    return (last_day is None or when.date() > last_day) and when.date() >= to_sg(ctx.now).date()
 
 
 def next_draw(ctx: Context, game: str) -> NextDraw:
     """Number and date of the next draw of ``game`` ("toto" or "4d").
 
     The date comes from the next draw page when it is later than the newest stored draw;
-    otherwise it is the next regular draw day after the newest stored draw.
+    otherwise it is the next regular draw day after the newest stored draw. When that day is
+    already past (the stored results are behind, for example because the site could not be
+    read), the next regular draw day from today is shown instead, marked ``stale``, with no
+    draw number (special draws in between cannot be counted). A draw later today still counts
+    as the next draw, since its result may simply not be out yet.
     """
-    df = ctx.toto if game == "toto" else ctx.fourd
-    row = latest_row(df)
-    last_no = as_int(field(row, "draw_number"), 0) if row is not None else 0
-    last_day = as_date(field(row, "draw_date")) if row is not None else None
+    last_no, last_day = _last_stored(ctx, game)
     number = last_no + 1 if last_no > 0 else None
+    weekdays = C.TOTO_WEEKDAYS if game == "toto" else C.FOURD_WEEKDAYS
 
     info = ctx.next_toto if game == "toto" else ctx.next_fourd
     when = to_sg(getattr(info, "draw_datetime", None))
     if when is not None and (last_day is None or when.date() > last_day):
-        return NextDraw(game, number, when.date(), when, False)
-    if last_day is None:
+        nd = NextDraw(game, number, when.date(), when, False)
+    elif last_day is None:
         return NextDraw(game, number, None, None, False)
-    weekdays = C.TOTO_WEEKDAYS if game == "toto" else C.FOURD_WEEKDAYS
-    d = last_day + timedelta(days=1)
+    else:
+        d = last_day + timedelta(days=1)
+        while d.weekday() not in weekdays:
+            d += timedelta(days=1)
+        nd = NextDraw(game, number, d, datetime.combine(d, C.DRAW_TIME, tzinfo=SG), True)
+    today = to_sg(ctx.now).date()
+    if nd.day is None or nd.day >= today:
+        return nd
+    d = today
     while d.weekday() not in weekdays:
         d += timedelta(days=1)
-    return NextDraw(game, number, d, datetime.combine(d, C.DRAW_TIME, tzinfo=SG), True)
+    return NextDraw(game, None, d, datetime.combine(d, C.DRAW_TIME, tzinfo=SG), True, stale=True)
 
 
 def draw_note_name(game: str, number: int, day: date | None) -> str:
@@ -259,6 +294,22 @@ def activity_note_name(now: datetime) -> str:
 def link(name: str, alias: str | None = None) -> str:
     """An Obsidian [[wikilink]]."""
     return f"[[{name}|{alias}]]" if alias else f"[[{name}]]"
+
+
+def draw_note_rel(game: str, number: int, day: date | None) -> str:
+    """ "Draws/TOTO/2026-10-01 TOTO 4123.md": a draw note's path in the bot folder."""
+    return f"{DRAW_FOLDERS[game]}/{draw_note_name(game, number, day)}.md"
+
+
+def note_link(rel: str) -> str:
+    """Wikilink to a note by its path in the bot folder, with the folder in the link and the
+    file name as the alias: ``[[Draws/TOTO/2026-10-01 TOTO 4123|2026-10-01 TOTO 4123]]``.
+
+    A draw note and the suggestion note made before that draw share a file name, so a bare
+    ``[[2026-10-01 TOTO 4123]]`` could open either one; the folder makes the link exact.
+    """
+    name = str(rel).removesuffix(".md")
+    return link(name, name.rsplit("/", 1)[-1]) if "/" in name else link(name)
 
 
 # Odds
@@ -310,9 +361,27 @@ def _best_ibet(values: Any) -> float | None:
     return as_float(values)
 
 
+def _signal_without_estimate(ctx: Context):
+    """The buy signal worked out without the next draw page (no jackpot estimate)."""
+    if _frame(ctx.toto) is None:
+        return None
+    try:
+        return buysignal.buy_signal(None, ctx.toto, ctx.settings, ctx.rules)
+    except Exception as exc:  # never let a layout helper break the report
+        log.warning("The buy signal could not be worked out without the next draw page: %s", exc)
+        return None
+
+
 def toto_signal(ctx: Context) -> dict:
-    """Next TOTO draw figures in one place (buy signal first, next draw page second)."""
+    """Next TOTO draw figures in one place (buy signal first, next draw page second).
+
+    When the next draw page info is about a draw already held (see ``next_info_is_current``),
+    its jackpot estimate belongs to that draw, not the next one: the figures are then worked
+    out without it, so the jackpot and the return per $1 show as not available.
+    """
     bs, nt = ctx.buy_signal, ctx.next_toto
+    if nt is not None and not next_info_is_current(ctx, "toto"):
+        bs, nt = _signal_without_estimate(ctx), None
     jackpot = as_float(bs.jackpot) if bs is not None else None
     if jackpot is None and nt is not None:
         jackpot = as_float(nt.jackpot_estimate)
@@ -577,12 +646,11 @@ def _md_section2(ctx: Context) -> str:
             parts.append(f"### Latest {label} draw\n\nNo {label} results are stored yet.")
             continue
         number, day = as_int(field(row, "draw_number")), as_date(field(row, "draw_date"))
-        name = draw_note_name(game, number, day)
         parts.append(f"### Latest {label} draw {number}, {fmt_date(day)}")
         if game not in drawn:
             parts.append(f"No new {label} draw in this run; this is the newest stored result.")
         parts.append(toto_result_md(row) if game == "toto" else fourd_result_md(row))
-        parts.append(f"Draw note: {link(name)}.")
+        parts.append(f"Draw note: {note_link(draw_note_rel(game, number, day))}.")
 
     parts.append("### My ticket check")
     settled = list(ctx.settled_this_run or [])
@@ -828,12 +896,30 @@ def report_warnings(ctx: Context) -> list[str]:
     return out
 
 
+def _stale_text(ctx: Context) -> str | None:
+    """Plain notice when the stored results of a game reported in this run are behind (draws
+    were held after the newest one), or None when they are up to date."""
+    behind = []
+    for game in (g for g in GAME_NAMES if g in ctx.games_drawn):
+        last_no, _ = _last_stored(ctx, game)
+        if last_no and next_draw(ctx, game).stale:
+            behind.append(f"{GAME_NAMES[game]} draw {last_no}")
+    if not behind:
+        return None
+    return (f"Results not up to date: the newest stored {'results are' if len(behind) > 1 else 'result is'} "
+            f"{_and_list(behind)}, and newer draws have been held since. The Singapore Pools site could not "
+            "be read, or fetching was turned off.")
+
+
 def full_report(ctx: Context) -> str:
     """The run report as Obsidian markdown, in the order the analyst prompt asks for."""
     title = f"# Huat Bot report, {fmt_datetime(to_sg(ctx.now))}"
     parts = [title]
     drawn = [g for g in ctx.games_drawn if g in GAME_NAMES]
-    parts.append(f"Games drawn in this run: {games_text(drawn)}." if drawn else "No new draws in this run.")
+    parts.append(f"Games reported in this run: {games_text(drawn)}." if drawn else "No new draws in this run.")
+    stale = _stale_text(ctx)
+    if stale:
+        parts.append(f"**{stale}**")
     warnings = report_warnings(ctx)
     if warnings:
         parts.append("> [!warning] Warnings\n" + "\n".join(f"> * {w}" for w in warnings))
@@ -923,6 +1009,15 @@ def _ticket_line(r: dict) -> str:
     return f"{head}: {_h(r.get('result') or 'No prize')}"
 
 
+def _no_draw_cost(ctx: Context) -> float:
+    """Cost of the ledger tickets whose date had no draw (status "no_draw")."""
+    ledger = ctx.ledger
+    if not isinstance(ledger, pd.DataFrame) or ledger.empty or "status" not in ledger.columns:
+        return 0.0
+    cost = pd.to_numeric(ledger.loc[ledger["status"] == "no_draw", "cost"], errors="coerce")
+    return float(cost.fillna(0.0).sum())
+
+
 def _tg_tickets(ctx: Context, level: int) -> str:
     lines = ["<b>My tickets</b>"]
     settled = list(ctx.settled_this_run or [])
@@ -953,6 +1048,11 @@ def _tg_tickets(ctx: Context, level: int) -> str:
         if pending:
             lines.append(f"{plural(pending, 'ticket')} ({dollars(totals.get('pending_cost'))}) "
                          f"{'waits' if pending == 1 else 'wait'} for the draw.")
+        no_draw = as_int(totals.get("no_draw"))
+        if no_draw:
+            lines.append(f"{plural(no_draw, 'ticket')} ({dollars(_no_draw_cost(ctx))}) "
+                         f"{'has' if no_draw == 1 else 'have'} no draw on {'its' if no_draw == 1 else 'their'} "
+                         "date and still counts as spent. Check the date in Tickets.md.")
     elif not settled:
         lines.append("Add the tickets you buy to Tickets.md in the vault and the bot will check them.")
     if ctx.bad_ticket_lines:
@@ -971,6 +1071,9 @@ def _tg_message1(ctx: Context, level: int) -> list[str]:
     else:
         head = f"<b>Huat Bot results</b>, {fmt_date(to_sg(ctx.now))}"
     blocks = [head]
+    stale = _stale_text(ctx)
+    if stale:
+        blocks.append(f"<i>{_h(stale)}</i>")
     drawn = [g for g in ctx.games_drawn if g in GAME_NAMES]
     if "toto" in drawn:
         blocks.append(_tg_toto_result(ctx))
@@ -1058,7 +1161,7 @@ def _tg_plan(plan: Plan | None, game: str, nd: NextDraw, picks: Sequence[Any], l
         lines.append(f"{label} total: <b>{dollars(plan.total)}</b> of your {dollars(plan.budget)} budget")
     unbought = [p for p in picks if p.name not in {ln.label for ln in plan.lines}]
     if unbought and level < 2:
-        lines.append(f"Also suggested if the budget allows: {_h(_and_list([p.name for p in unbought]))}.")
+        lines.append(f"Not in the plan (details in the report): {_h(_and_list([p.name for p in unbought]))}.")
     return "\n".join(lines)
 
 
