@@ -181,7 +181,9 @@ def cmd_serve(args: argparse.Namespace, dry_run: bool) -> int:
     def check_fn(game: str):
         # The date counts only once the result page is complete (TOTO winning shares table,
         # all 23 4D numbers), so a page published in parts is waited for, not stored half done.
-        return site.latest_complete_date(fetcher, game)
+        # strict: a site that cannot be reached raises, so the scheduler's notice says so
+        # instead of blaming Singapore Pools for not publishing.
+        return site.latest_complete_date(fetcher, game, strict=True)
 
     def refresh_fn() -> dict:
         return runner.refresh_next_draws(vault, fetcher)

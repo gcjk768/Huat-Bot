@@ -118,7 +118,9 @@ def test_dashboard_without_next_draw_info(ctx):
     bare = variant(ctx, next_toto=None, next_fourd=None, buy_signal=None)
     _, fm, body = _check_note(notes.dashboard_note(bare))
     assert "regular schedule" in body
-    assert f"[[Suggestions/{TOTO_SUGGESTION}|{TOTO_SUGGESTION}]]" in body  # date worked out from the TOTO draw days
+    # A date worked out from the TOTO draw days has no draw number (a special draw before it
+    # would take it), so no suggestion note is linked under a number that may be wrong.
+    assert "Suggestions/2026-10-05 TOTO" not in body
     assert fm["buy_signal"] is None
 
 
@@ -360,12 +362,78 @@ def test_write_all_skips_notes_whose_only_change_is_the_time_stamp(tmp_path, ctx
     later = variant(ctx, now=ctx.now + pd.Timedelta(hours=1), new_draws={})
     logged = len(_log_rows(vault, "NOTE"))
     written = notes.write_all(vault, later, report.full_report(later))
-    assert set(written) == {"Dashboard.md", "Reports/2026-10-01 2030 Report.md"}
+    # The report differs only in its time, so the 7.30pm report stays the newest one.
+    assert set(written) == {"Dashboard.md"}
+    assert not vault.exists("Reports/2026-10-01 2030 Report.md")
+    assert f"Newest report: [[{REPORT_NAME}]]" in vault.read_text("Dashboard.md")
     for rel, text in keep.items():
         assert vault.read_text(rel) == text, rel
-    assert len(_log_rows(vault, "NOTE")) == logged + 2  # no "Updated [[Ledger]]" or suggestion rows
+    assert len(_log_rows(vault, "NOTE")) == logged + 1  # no "Updated [[Ledger]]" or suggestion rows
 
     # A real change is still written, with its new time stamp.
     changed = variant(later, ledger_totals={**ctx.ledger_totals, "spent": 99.0})
     assert "Ledger.md" in notes.write_all(vault, changed, report.full_report(changed))
     assert vault.read_note("Ledger.md")[0]["updated"].startswith("2026-10-01T20:30")
+
+
+# A draw held earlier today whose result is not stored yet
+
+
+def test_held_draw_gets_no_plan_or_signal_in_the_dashboard_and_no_new_suggestion_note(tmp_path, ctx):
+    # Mon 5 Oct at 9pm: the 6.30pm TOTO draw 4124 is held, its result is not stored yet.
+    late = variant(ctx, now=datetime(2026, 10, 5, 21, 0, tzinfo=report.SG))
+    assert report.next_draw(late, "toto").held
+    _, fm, body = _check_note(notes.dashboard_note(late))
+    section = body.split("## Suggested purchases")[1].split("## My tickets")[0]
+    for line in ctx.toto_plan.lines:
+        assert line.numbers not in section
+    assert "| TOTO |" not in section
+    assert "TOTO draw 4124. No suggestions: this draw was held at 6.30pm today" in section
+    # The total matches message 3: the 4D plan only.
+    total = f"Total {report.dollars(ctx.fourd_plan.total)} of the {report.dollars(ctx.fourd_plan.budget)} budget."
+    assert total in section
+    assert (f"Total for both games: <b>{report.dollars(ctx.fourd_plan.total)}</b> of your "
+            f"{report.dollars(ctx.fourd_plan.budget)} budget.") in report.telegram_messages(late)[2]
+    signal = body.split("## Buy signal")[1].split("## Latest results")[0]
+    assert "No buy signal: this draw was held and its sales are closed." in signal
+    assert "Not worked out" not in signal
+    next_rows = body.split("## Next draws")[1].split("## Buy signal")[0]
+    toto_row = next(ln for ln in next_rows.splitlines() if ln.startswith("| TOTO"))
+    assert "sales closed" in toto_row and "jackpot" not in toto_row
+    assert fm["buy_signal"] is None and fm["next_toto_jackpot"] is None
+
+    # No suggestion note for the held draw: the one written before the draw stays as it was.
+    assert not any(rel.endswith(f"{TOTO_SUGGESTION}.md") for rel, _, _ in notes.suggestions_notes(late))
+    vault = Vault(tmp_path / "vault")
+    notes.write_all(vault, variant(ctx, now=datetime(2026, 10, 5, 17, 0, tzinfo=report.SG)), report_md="# r\n")
+    before = vault.read_text(f"Suggestions/{TOTO_SUGGESTION}.md")
+    assert all(line.numbers in before for line in ctx.toto_plan.lines)
+    written = notes.write_all(vault, late, report.full_report(late))
+    assert f"Suggestions/{TOTO_SUGGESTION}.md" not in written
+    assert vault.read_text(f"Suggestions/{TOTO_SUGGESTION}.md") == before
+
+
+# A rerun whose report only differs in its time
+
+
+def test_rerun_with_the_same_report_keeps_the_earlier_report_note(tmp_path, ctx):
+    vault = Vault(tmp_path / "vault")
+    notes.write_all(vault, ctx, report.full_report(ctx))
+    retry = variant(ctx, now=ctx.now + pd.Timedelta(minutes=10), new_draws={})
+    retry_md = report.full_report(retry)
+    written = notes.write_all(vault, retry, retry_md)
+    assert not any(p.startswith("Reports/") for p in written)
+    assert sorted(p.name for p in vault.path("Reports").glob("*.md")) == [f"{REPORT_NAME}.md"]
+    assert notes.report_rel(vault, retry, retry_md) == f"Reports/{REPORT_NAME}.md"
+    assert f"Newest report: [[{REPORT_NAME}]]" in vault.read_text("Dashboard.md")
+
+    # A report with different content is a new note, and the Dashboard links to it.
+    changed = variant(retry, commentary="Something new.")
+    changed_md = report.full_report(changed)
+    assert "Reports/2026-10-01 1940 Report.md" in notes.write_all(vault, changed, changed_md)
+    assert notes.report_rel(vault, changed, changed_md) == "Reports/2026-10-01 1940 Report.md"
+    assert "Newest report: [[2026-10-01 1940 Report]]" in vault.read_text("Dashboard.md")
+
+    # A report from another day is never reused.
+    next_day = variant(ctx, now=ctx.now + pd.Timedelta(days=1), new_draws={})
+    assert "Reports/2026-10-02 1930 Report.md" in notes.write_all(vault, next_day, report.full_report(next_day))

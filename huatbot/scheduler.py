@@ -223,13 +223,17 @@ def sleep_until(target: datetime, now_fn: Callable[[], datetime], sleep_fn: Call
         sleep_fn(min(remaining, chunk))
 
 
-def _result_ready(check: Callable[[str], Any], game: str, d: date) -> bool:
-    """Ask ``check`` for the latest draw date on the site. A failing check counts as not ready."""
+def _result_ready(check: Callable[[str], Any], game: str, d: date,
+                  reached: dict[str, bool] | None = None) -> bool:
+    """Ask ``check`` for the latest draw date on the site. A failing check counts as not ready.
+    A check that did not raise reached the site: ``reached[game]`` is then set to True."""
     try:
         latest = _as_date(check(game))
     except Exception as exc:  # network trouble: just try again at the next check
         log.warning("Could not check the latest %s draw: %s", GAME_LABELS.get(game, game), exc)
         return False
+    if reached is not None:
+        reached[game] = True
     # The draw of day d is out when the site's latest draw is d (a later date also means it is out).
     return latest is not None and latest >= d
 
@@ -239,7 +243,8 @@ def wait_for_results(games: Iterable[str], d: date, check: Callable[[str], Any],
                      retry_minutes: float = C.DEFAULT_RETRY_MINUTES,
                      retry_hours: float = C.DEFAULT_RETRY_HOURS, *,
                      on_ready: Callable[[tuple[str, ...], dict[str, datetime | None]], Iterable[str]] | None = None,
-                     start_at: Mapping[str, datetime] | None = None) -> dict[str, bool]:
+                     start_at: Mapping[str, datetime] | None = None,
+                     reached: dict[str, bool] | None = None) -> dict[str, bool]:
     """Wait until each game's result for day ``d`` is on the site, or the window runs out.
 
     The first check is immediate. Checks repeat every ``retry_minutes`` (timed from the first
@@ -253,9 +258,14 @@ def wait_for_results(games: Iterable[str], d: date, check: Callable[[str], Any],
     waiting for the others. It returns the games it finished; a game it did not finish (the
     run could not store or post it) is passed to it again at that game's next check, while
     the window lasts. ``retry_at`` gives each game's next check time, or None after the last.
+    ``reached`` (optional) is filled with ``{game: True}`` once a check of that game got an
+    answer from the site (``check`` did not raise), else False.
     """
     games = tuple(games)
     status = {g: False for g in games}
+    if reached is not None:
+        for g in games:
+            reached.setdefault(g, False)
     if not games:
         return status
     first = _to_sg(now_fn())
@@ -279,7 +289,7 @@ def wait_for_results(games: Iterable[str], d: date, check: Callable[[str], Any],
         due = [g for g in games if g in active and next_at[g] <= now]
         for g in due:
             if not status[g]:
-                status[g] = _result_ready(check, g, d)
+                status[g] = _result_ready(check, g, d, reached)
         out = tuple(g for g in due if status[g])
         finished = set(out)
         if out and on_ready is not None:
@@ -411,14 +421,35 @@ def _missing_message(missing: tuple[str, ...], day: date, config: SchedulerConfi
     )
 
 
-def _failed_message(failed: tuple[str, ...], day: date, config: SchedulerConfig) -> str:
-    """Plain, dash free notice that a result is out but no run managed to store or post it."""
+def _unreachable_message(games: tuple[str, ...], day: date, config: SchedulerConfig) -> str:
+    """Plain, dash free notice that no check within the retry window reached the site, so it is
+    not known whether the result is out."""
+    one = len(games) == 1
+    return (
+        f"{_names(games)} {'result' if one else 'results'} for {_fmt_day(day)} could not be checked: the "
+        f"Singapore Pools site could not be reached after {_fmt_window(config.retry_minutes, config.retry_hours)}, "
+        f"so {'it was' if one else 'they were'} not posted. {'It' if one else 'They'} will be stored on the "
+        f"next {_names(games)} {'run' if one else 'runs'} but not posted."
+    )
+
+
+def _failed_message(failed: tuple[str, ...], day: date, config: SchedulerConfig, posting: bool = False) -> str:
+    """Plain, dash free notice that a result is out but no run managed to store or post it.
+    ``posting``: the last run built the messages and only posting them failed."""
     one = len(failed) == 1
+    what = "could not be posted to Telegram" if posting else "could not be fetched or posted"
     return (
         f"{_names(failed)} {'result' if one else 'results'} for {_fmt_day(day)} "
-        f"{'is' if one else 'are'} on the Singapore Pools site but could not be fetched or posted "
+        f"{'is' if one else 'are'} on the Singapore Pools site but {what} "
         f"after {_fmt_window(config.retry_minutes, config.retry_hours)}. See the activity log."
     )
+
+
+def _post_failed(result: Any) -> bool:
+    """True when a run got as far as building the messages (so the draw data was used) and
+    then failed: only posting them went wrong."""
+    return (result is not _FAILED and not bool(getattr(result, "ok", True))
+            and bool(getattr(result, "messages", None)))
 
 
 def _error_text(exc: BaseException) -> str:
@@ -523,6 +554,7 @@ def _run_cycle(day: date, known: dict[str, set[date]], run_fn, check_fn, refresh
                                            f"{_fmt_clock(start_at[game].time())}")
 
     finished: set[str] = set()
+    post_failed: dict[str, bool] = {}  # game -> its last run failed only at posting
 
     def on_ready(ready: tuple[str, ...], retry_at: dict[str, datetime | None]) -> set[str]:
         # A draw an earlier run already stored (and posted) is not run again, for example after
@@ -546,6 +578,8 @@ def _run_cycle(day: date, known: dict[str, set[date]], run_fn, check_fn, refresh
             _safe_call(log_fn, "ERROR", f"Run for {_names(ready)} failed: {_error_text(exc)}")
         done = {g for g in ready if _is_done(g, day, result, done_fn)}
         finished.update(done)
+        for g in ready:
+            post_failed[g] = _post_failed(result)
         left = [g for g in ready if g not in done and retry_at.get(g) is not None]
         if left:
             one = len(left) == 1
@@ -555,19 +589,28 @@ def _run_cycle(day: date, known: dict[str, set[date]], run_fn, check_fn, refresh
                                        f"or posted yet, trying again at {_fmt_clock(when.time())}")
         return done | already
 
+    reached: dict[str, bool] = {}
     status = wait_for_results(games, day, check_fn, now_fn, sleep_fn, config.retry_minutes, config.retry_hours,
-                              on_ready=on_ready, start_at=start_at)
-    missing = tuple(g for g in games if not status.get(g))
+                              on_ready=on_ready, start_at=start_at, reached=reached)
+    # A game no check could ask the site about is not known to be missing: the site was down.
+    unreachable = tuple(g for g in games if not status.get(g) and not reached.get(g, True))
+    missing = tuple(g for g in games if not status.get(g) and g not in unreachable)
     failed = tuple(g for g in games if status.get(g) and g not in finished)
 
     if missing:
         message = _missing_message(missing, day, config)
         _safe_call(log_fn, "WAIT", message)
         _safe_call(notify_fn, message)
-    if failed:
-        message = _failed_message(failed, day, config)
+    if unreachable:
+        message = _unreachable_message(unreachable, day, config)
         _safe_call(log_fn, "ERROR", message)
         _safe_call(notify_fn, message)
+    for posting in (False, True):
+        group = tuple(g for g in failed if post_failed.get(g, False) == posting)
+        if group:
+            message = _failed_message(group, day, config, posting)
+            _safe_call(log_fn, "ERROR", message)
+            _safe_call(notify_fn, message)
 
 
 def serve(run_fn: Callable[..., Any], check_fn: Callable[[str], Any], refresh_fn: Callable[[], dict],
@@ -583,11 +626,13 @@ def serve(run_fn: Callable[..., Any], check_fn: Callable[[str], Any], refresh_fn
     ``run_fn(games=...)`` as soon as a game's result is out. A game the run did not finish
     (``done_fn(game, day)`` is False, or without ``done_fn`` the run raised or returned
     ``ok=False``) is run again at each later check of the window, with a WAIT row. A game
-    still missing at the end gets a WAIT row and a plain ``notify_fn`` message; a game that
-    was out but never finished gets an ERROR row and a message. An exception anywhere in a
-    cycle is logged and the loop carries on.
+    still missing at the end gets a WAIT row and a plain ``notify_fn`` message (an ERROR row
+    saying the site could not be reached when every check of it raised); a game that was out
+    but never finished gets an ERROR row and a message. An exception anywhere in a cycle is
+    logged and the loop carries on.
 
-    Hooks: ``check_fn(game) -> date | None`` (latest draw date on the site), ``log_fn(event,
+    Hooks: ``check_fn(game) -> date | None`` (latest draw date on the site, None while it is
+    not out; it should raise when the site cannot be reached), ``log_fn(event,
     message)`` (the vault activity log), ``notify_fn(text)`` (Telegram), ``done_fn(game, day)``
     (the draw of ``day`` is stored, and posted when posting is on).
     """

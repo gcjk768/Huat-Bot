@@ -13,7 +13,7 @@ import pytest
 from huatbot import buysignal as B
 from huatbot import constants as C
 from huatbot.analysis_toto import crowd_table
-from huatbot.models import NextToto, PrizeRules, Settings
+from huatbot.models import NextToto, Settings
 from huatbot.store import no_winner_streak, normalise_toto
 
 DASHES = re.compile("[-–—]")
