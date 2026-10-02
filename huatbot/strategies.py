@@ -26,7 +26,7 @@ import pandas as pd
 
 from . import constants as C
 from . import prizes
-from .analysis_toto import frequency, frequency_table, overdue, shape_stats
+from .analysis_toto import frequency, overdue, shape_stats
 from .models import FOURD_NUMBER_COLUMNS, FourDPick, TotoPick
 from .textfmt import fmt_date, fmt_num, pct, plural
 
@@ -47,6 +47,7 @@ LOW_CROWD_VALID_SAMPLES = 2_000  # best (least crowded) of up to this many valid
 LOW_CROWD_MAX_TRIES = 20_000  # random sets tried per relaxation level
 LOW_CROWD_ODD = (2, 4)  # odd count range of a Low Crowd set
 LOW_CROWD_LOW = (2, 4)  # low (1 to 24) count range of a Low Crowd set
+LOW_CROWD_STREAM = 1  # rng for Low Crowd is default_rng([seed, 1]), separate from Balanced
 
 # Pattern rules: a set looks "patterned" (and is likely shared with many other players) when
 # it breaks one of these. Used by low_crowd_set, pattern_problems and system7_from.
@@ -97,8 +98,10 @@ def _last_draw_numbers(hist: pd.DataFrame) -> list[int] | None:
     return _numbers_of(hist.iloc[-1])
 
 
-def _score_array(crowd_scores: Any) -> tuple[np.ndarray, bool]:
+def crowd_score_array(crowd_scores: Any) -> tuple[np.ndarray, bool]:
     """Crowd score per number as an array (index 0 is number 1) and whether any score is set.
+
+    Shared with ``suggest`` so both read crowd scores the same way.
 
     Accepts a Series or dict keyed by number (string keys from a JSON cache work too). Missing
     or non finite scores count as zero. ``available`` is False when every score is zero.
@@ -121,7 +124,7 @@ def _score_array(crowd_scores: Any) -> tuple[np.ndarray, bool]:
 
 def crowd_scores_available(crowd_scores: Any) -> bool:
     """True when ``crowd_scores`` holds at least one non zero score."""
-    return _score_array(crowd_scores)[1]
+    return crowd_score_array(crowd_scores)[1]
 
 
 def _sum_bounds(shape: dict) -> tuple[int, int]:
@@ -177,43 +180,59 @@ class _Sampler:
             yield self._new_batch()
 
 
-def _rule_masks(sets: np.ndarray, last: list[int] | None, sum_lo: int, sum_hi: int,
-                odd_range: tuple[int, int], low_range: tuple[int, int]) -> dict[str, np.ndarray]:
-    """Which rows of ``sets`` (k numbers each, ascending) pass each named rule.
+def _rule_masks(sets: np.ndarray, rules: Iterable[str], last: list[int] | None, sum_lo: int,
+                sum_hi: int, odd_range: tuple[int, int], low_range: tuple[int, int]) -> dict[str, np.ndarray]:
+    """Which rows of ``sets`` (k numbers each, ascending) pass each of the named ``rules``.
 
     Balance rules: "balance" (odd and low counts in range) and "sum" (sum in range).
     Pattern rules (the same ones ``pattern_problems`` explains): "consecutive", "birthday",
-    "last_draw", "progression", "last_digit".
+    "last_draw", "progression", "last_digit". Only the rules asked for are computed.
     """
-    odd = (sets % 2 == 1).sum(axis=1)
-    low = (sets <= C.TOTO_LOW_MAX).sum(axis=1)
-    total = sets.sum(axis=1)
+    n, k = sets.shape
     gaps = np.diff(sets, axis=1)
-    ones = np.ones(len(sets), dtype=bool)
-
-    run3 = ((gaps[:, :-1] == 1) & (gaps[:, 1:] == 1)).any(axis=1) if gaps.shape[1] >= 2 else ~ones
-    last_digits = sets % 10
-    digit_counts = (last_digits[:, :, None] == np.arange(10)).sum(axis=1)
-    if last:
-        shared_ok = np.isin(sets, np.asarray(last)).sum(axis=1) <= MAX_SHARED_WITH_LAST
-    else:
-        shared_ok = ones
-    return {
-        "balance": (odd >= odd_range[0]) & (odd <= odd_range[1])
-        & (low >= low_range[0]) & (low <= low_range[1]),
-        "sum": (total >= sum_lo) & (total <= sum_hi),
-        "consecutive": ~run3,
-        "birthday": (sets > C.TOTO_BIRTHDAY_MAX).sum(axis=1) >= MIN_ABOVE_BIRTHDAY,
-        "last_draw": shared_ok,
-        "progression": ~(gaps == gaps[:, :1]).all(axis=1),
-        "last_digit": digit_counts.max(axis=1) <= MAX_SAME_LAST_DIGIT,
-    }
-
-
-def _combine(masks: dict[str, np.ndarray], rules: Iterable[str], n: int) -> np.ndarray:
-    ok = np.ones(n, dtype=bool)
+    out: dict[str, np.ndarray] = {}
     for rule in rules:
-        ok &= masks[rule]
+        if rule == "balance":
+            odd = (sets & 1).sum(axis=1)
+            low = (sets <= C.TOTO_LOW_MAX).sum(axis=1)
+            out[rule] = ((odd >= odd_range[0]) & (odd <= odd_range[1])
+                         & (low >= low_range[0]) & (low <= low_range[1]))
+        elif rule == "sum":
+            total = sets.sum(axis=1)
+            out[rule] = (total >= sum_lo) & (total <= sum_hi)
+        elif rule == "consecutive":
+            # A run of MAX_RUN + 1 numbers is MAX_RUN gaps of 1 in a row.
+            step1 = gaps == 1
+            run = np.zeros(n, dtype=bool)
+            for i in range(max(k - MAX_RUN, 0)):
+                run |= step1[:, i : i + MAX_RUN].all(axis=1)
+            out[rule] = ~run
+        elif rule == "birthday":
+            out[rule] = (sets > C.TOTO_BIRTHDAY_MAX).sum(axis=1) >= MIN_ABOVE_BIRTHDAY
+        elif rule == "last_draw":
+            if last:
+                shared = (sets[:, :, None] == np.asarray(last)[None, None, :]).any(axis=2).sum(axis=1)
+                out[rule] = shared <= MAX_SHARED_WITH_LAST
+            else:
+                out[rule] = np.ones(n, dtype=bool)
+        elif rule == "progression":
+            out[rule] = ~(gaps == gaps[:, :1]).all(axis=1)
+        elif rule == "last_digit":
+            # Sorted last digits: more than MAX_SAME_LAST_DIGIT equal ones means two equal
+            # entries MAX_SAME_LAST_DIGIT places apart.
+            digits = np.sort(sets % 10, axis=1)
+            m = MAX_SAME_LAST_DIGIT
+            out[rule] = ~(digits[:, m:] == digits[:, :-m]).any(axis=1) if k > m else np.ones(n, dtype=bool)
+        else:
+            raise ValueError(f"unknown rule {rule!r}")
+    return out
+
+
+def _passes(sets: np.ndarray, rules: Iterable[str], *args: Any) -> np.ndarray:
+    """True for rows of ``sets`` that pass every rule in ``rules`` (see ``_rule_masks``)."""
+    ok = np.ones(len(sets), dtype=bool)
+    for mask in _rule_masks(sets, rules, *args).values():
+        ok &= mask
     return ok
 
 
@@ -233,19 +252,20 @@ def hot_set(hist: pd.DataFrame) -> TotoPick:
     Ties go to the count over the last 100 draws, then all history, then the lower number.
     """
     hist = _sorted(hist)
-    table = frequency_table(hist)
-    nums = table.index.to_numpy()
-    # lexsort sorts by the last key first.
-    order = np.lexsort((nums, -table["all"].to_numpy(), -table["last100"].to_numpy(),
-                        -table["last50"].to_numpy()))
+    recent = frequency(hist, last=HOT_WINDOW)
+    tie = frequency(hist, last=HOT_TIE_WINDOW)
+    total = frequency(hist)
+    nums = recent.index.to_numpy()
+    # lexsort sorts by the last key first: recent count, then tie window, then all time, then number.
+    order = np.lexsort((nums, -total.to_numpy(), -tie.to_numpy(), -recent.to_numpy()))
     chosen = sorted(int(n) for n in nums[order[: C.TOTO_PICK]])
 
     window = min(HOT_WINDOW, len(hist))
     if window == 0:
         reason = "No draw history yet, so no number is hot; these are simply the lowest numbers"
     else:
-        counts = table.loc[chosen, "last50"]
-        average = float(table["last50"].mean())
+        counts = recent.loc[chosen]
+        average = float(recent.mean())
         reason = (f"Drawn {_range_text(counts.min(), counts.max(), 'time')} each in the last "
                   f"{plural(window, 'draw')}, against an average of {average:.1f} per number")
     return TotoPick(name="Hot", numbers=chosen, reason=reason)
@@ -302,10 +322,9 @@ def balanced_set(hist: pd.DataFrame, seed: int) -> TotoPick:
     for relaxed, odd_slack, low_slack, use_sum in _BALANCED_LEVELS:
         rules = ["balance"] + (["sum"] if use_sum else [])
         for batch in sampler.batches():
-            masks = _rule_masks(batch, None, sum_lo, sum_hi,
-                                (t_odd - odd_slack, t_odd + odd_slack),
-                                (t_low - low_slack, t_low + low_slack))
-            ok = _combine(masks, rules, len(batch))
+            ok = _passes(batch, rules, None, sum_lo, sum_hi,
+                         (t_odd - odd_slack, t_odd + odd_slack),
+                         (t_low - low_slack, t_low + low_slack))
             if ok.any():
                 chosen = [int(n) for n in batch[int(np.argmax(ok))]]
                 break
@@ -316,13 +335,16 @@ def balanced_set(hist: pd.DataFrame, seed: int) -> TotoPick:
     odd = sum(n % 2 for n in chosen)
     low = sum(n <= C.TOTO_LOW_MAX for n in chosen)
     if shape["n_draws"] == 0:
+        where = "inside" if sum_lo <= sum(chosen) <= sum_hi else "outside"
         reason = (f"No draw history yet, so this follows the theoretical shape: {_shape_text(chosen)}, "
-                  f"inside the middle half sum range {sum_lo} to {sum_hi}")
+                  f"{where} the middle half sum range {sum_lo} to {sum_hi}")
     else:
         lead = "Close to the usual shape" if relaxed else "Matches the usual shape"
-        reason = (f"{lead}: {odd} odd ({pct(shape['odd_dist'].get(odd, 0.0), 0)} of draws), "
-                  f"{low} low, 1 to {C.TOTO_LOW_MAX} ({pct(shape['low_dist'].get(low, 0.0), 0)} of draws), "
-                  f"sum {sum(chosen)} against the middle half range {sum_lo} to {sum_hi}")
+        total = sum(chosen)
+        where = "inside" if sum_lo <= total <= sum_hi else "outside"
+        reason = (f"{lead}: {odd} odd ({pct(shape['odd_dist'].get(odd, 0.0), 0)} of past draws), "
+                  f"{low} low from 1 to {C.TOTO_LOW_MAX} ({pct(shape['low_dist'].get(low, 0.0), 0)} "
+                  f"of past draws), sum {total} {where} the middle half range {sum_lo} to {sum_hi}")
     if relaxed:
         reason += f"; rules relaxed: {relaxed}"
     return TotoPick(name="Balanced", numbers=sorted(chosen), reason=reason)
@@ -363,7 +385,7 @@ def low_crowd_set(hist: pd.DataFrame, crowd_scores: pd.Series | None, seed: int)
     all zero). Rules: odd count 2 to 4, low count 2 to 4, sum in [q25, q75], no 3 consecutive
     numbers, at least 2 numbers above 31, at most 1 number shared with the last draw in
     ``hist``, not an arithmetic progression, at most 3 numbers with the same last digit. Random
-    sets come from ``default_rng(seed)``; among up to 2,000 valid ones (from up to 20,000
+    sets come from ``default_rng([seed, 1])``; among up to 2,000 valid ones (from up to 20,000
     tried) the set with the lowest total crowd score wins (ties: the first one found).
 
     If nothing qualifies, rules are relaxed in this order (see ``_LOW_CROWD_LEVELS``): use all 49
@@ -371,11 +393,12 @@ def low_crowd_set(hist: pd.DataFrame, crowd_scores: pd.Series | None, seed: int)
     rules, and finally take any set.
     """
     hist = _sorted(hist)
-    scores, available = _score_array(crowd_scores)
+    scores, available = crowd_score_array(crowd_scores)
     shape = shape_stats(hist)
     sum_lo, sum_hi = _sum_bounds(shape)
     last = _last_draw_numbers(hist)
-    rng = np.random.default_rng(seed)
+    # Its own stream of the seed, so without crowd scores it does not repeat the Balanced set.
+    rng = np.random.default_rng([seed, LOW_CROWD_STREAM])
 
     if available:
         order = np.lexsort((NUMBERS, scores))  # lowest score first, ties lower number
@@ -399,8 +422,7 @@ def low_crowd_set(hist: pd.DataFrame, crowd_scores: pd.Series | None, seed: int)
         valid: list[np.ndarray] = []
         found = 0
         for batch in sampler_for(all_numbers).batches():
-            masks = _rule_masks(batch, last, sum_lo, sum_hi, LOW_CROWD_ODD, LOW_CROWD_LOW)
-            ok_rows = batch[_combine(masks, rules, len(batch))]
+            ok_rows = batch[_passes(batch, rules, last, sum_lo, sum_hi, LOW_CROWD_ODD, LOW_CROWD_LOW)]
             if len(ok_rows):
                 valid.append(ok_rows[: LOW_CROWD_VALID_SAMPLES - found])
                 found += len(valid[-1])
@@ -505,7 +527,7 @@ def system7_from(pick: TotoPick, crowd_scores: pd.Series | None, last_draw: Any 
     base = sorted({int(n) for n in pick.numbers})
     if len(base) != C.TOTO_PICK:
         raise ValueError(f"a System 7 is built from 6 different numbers, got {pick.numbers}")
-    scores, _ = _score_array(crowd_scores)
+    scores, _ = crowd_score_array(crowd_scores)
     others = [int(n) for n in NUMBERS if int(n) not in base]
     others.sort(key=lambda n: (scores[n - 1], n))
 
@@ -592,13 +614,14 @@ def _repeat_pick(hist: pd.DataFrame, values: np.ndarray, fallback: str) -> FourD
         # Most recent win first, then the lower number.
         winner = int(tied[np.lexsort((tied, -last_seen[tied]))[0]])
         when = fmt_date(hist["draw_date"].iloc[int(last_seen[winner])])
+        latest = f"; latest win {when}" if when != "n/a" else ""
         if len(tied) > 1:
             lead = (f"Won {plural(best, 'time')} in the last {plural(n_draws, 'draw')}, tied with "
                     f"{plural(len(tied) - 1, 'other number')} for the most wins")
         else:
             lead = (f"Won {plural(best, 'time')} in the last {plural(n_draws, 'draw')}, "
                     "more than any other number")
-        reason = f"{lead}; latest win {when}"
+        reason = lead + latest
         return FourDPick(name="Repeat Winner", number=f"{winner:04d}", bet_type="Big", reason=reason)
 
     first_col = FOURD_NUMBER_COLUMNS.index("first")
@@ -606,8 +629,9 @@ def _repeat_pick(hist: pd.DataFrame, values: np.ndarray, fallback: str) -> FourD
         firsts = np.flatnonzero(values[:, first_col] >= 0)
         if len(firsts):
             i = int(firsts[-1])
+            when = fmt_date(hist["draw_date"].iloc[i])
             reason = (f"No number has won twice in the last {plural(n_draws, 'draw')}, so this is "
-                      f"the latest 1st Prize ({fmt_date(hist['draw_date'].iloc[i])})")
+                      "the latest 1st Prize" + (f" ({when})" if when != "n/a" else ""))
             return FourDPick(name="Repeat Winner", number=f"{int(values[i, first_col]):04d}",
                              bet_type="Big", reason=reason)
     reason = "No 4D history yet, so this is a random number"
