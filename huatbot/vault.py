@@ -138,6 +138,20 @@ def _represent_list(dumper: yaml.SafeDumper, data: list) -> yaml.Node:
 
 _FrontmatterDumper.add_representer(list, _represent_list)
 
+# Strings that a YAML 1.2 reader (Obsidian) would turn into a number, such as the 4D number
+# "0042" or "1e3". PyYAML follows YAML 1.1 and leaves "0042" unquoted because 1.1 reads it as
+# octal only with digits 0 to 7, so force quotes for anything number shaped.
+_NUMBER_LIKE = re.compile(r"^[+-]?(\d[\d_]*(\.\d*)?|\.\d+)([eE][+-]?\d+)?$|^0[xXoObB][0-9a-fA-F_]+$")
+
+
+def _represent_str(dumper: yaml.SafeDumper, data: str) -> yaml.Node:
+    if _NUMBER_LIKE.match(data):
+        return dumper.represent_scalar("tag:yaml.org,2002:str", data, style="'")
+    return dumper.represent_str(data)
+
+
+_FrontmatterDumper.add_representer(str, _represent_str)
+
 
 def _plain(value: Any) -> Any:
     """Convert a frontmatter value to plain YAML friendly types.
