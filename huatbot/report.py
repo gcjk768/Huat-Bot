@@ -34,6 +34,7 @@ import pandas as pd
 from . import buysignal
 from . import constants as C
 from . import prizes
+from . import tickets as ticket_ledger
 from .analysis_fourd import bet_type_value
 from .analysis_toto import format_p
 from .backtest import BETTER_ABOVE, RANDOM_NAME, WORSE_BELOW
@@ -207,7 +208,10 @@ class NextDraw:
     """The next draw of one game as far as the context knows it."""
 
     game: str  # "toto" or "4d"
-    number: int | None  # latest stored draw number + 1 (draw numbers run on without gaps)
+    # Latest stored draw number + 1 (draw numbers run on without gaps), for a date from the
+    # next draw page only: a date worked out from the regular schedule gets None, since a
+    # special draw before it would take that number.
+    number: int | None
     day: date | None
     when: datetime | None  # Singapore time
     from_schedule: bool = False  # True when the date was worked out from the regular draw days
@@ -248,6 +252,21 @@ def next_info_is_current(ctx: Context, game: str) -> bool:
     return (last_day is None or when.date() > last_day) and when.date() >= to_sg(ctx.now).date()
 
 
+# Start of the run warning (runner._update_from_site) for a game whose newest stored draw is
+# not the latest draw on the site: "TOTO: the newest stored draw (4124) does not match ...".
+_SITE_AHEAD = "the newest stored draw ("
+
+
+def _fetched_up_to_date(ctx: Context, game: str) -> bool:
+    """True when this run read ``game`` from the site (it is reported and has an entry in
+    ``ctx.new_draws``) and no warning says the site has a draw newer than the stored ones:
+    the newest stored draw is then the latest one held, whatever the regular draw days say."""
+    if game not in (ctx.games_drawn or ()) or game not in (ctx.new_draws or {}):
+        return False
+    prefix = f"{GAME_NAMES[game]}: {_SITE_AHEAD}"
+    return not any(str(w).startswith(prefix) for w in ctx.warnings or [])
+
+
 def _draw_day_between(after: date, before: date, weekdays: Iterable[int]) -> bool:
     """True when a day strictly between ``after`` and ``before`` falls on one of ``weekdays``."""
     days = set(weekdays)
@@ -263,15 +282,19 @@ def next_draw(ctx: Context, game: str) -> NextDraw:
     """Number and date of the next draw of ``game`` ("toto" or "4d").
 
     The date comes from the next draw page when it is later than the newest stored draw;
-    otherwise it is the next regular draw day after the newest stored draw. When that day is
-    already past (the stored results are behind, for example because the site could not be
-    read), the next regular draw day from today is shown instead, marked ``stale``, with no
-    draw number (special draws in between cannot be counted). The page date is marked
-    ``stale`` the same way, keeping its date but not a number, when a regular draw day falls
-    between the newest stored draw and it (a draw was held but is not stored, for example
-    because this run did not fetch that game). A draw earlier today still counts as the next
-    draw, since its result may simply not be out yet, but it is marked ``held``: its sales
-    are closed, so it gets no buy signal and no suggestions.
+    otherwise it is the next regular draw day after the newest stored draw, with no draw
+    number (a special draw before it would take that number). When that day is already past
+    (the stored results are behind, for example because the site could not be read), the
+    next regular draw day from today is shown instead, marked ``stale``, also with no draw
+    number. The page date is marked ``stale`` the same way, keeping its date but not a
+    number, when a regular draw day falls between the newest stored draw and it (a draw was
+    held but is not stored, for example because this run did not fetch that game). That
+    rule is skipped for a game this run read from the site with nothing newer there (see
+    ``_fetched_up_to_date``): its stored results are up to date, so a regular draw day in
+    between had no draw (moved or cancelled, as for a Hongbao draw or Chinese New Year). A
+    draw earlier today still counts as the next draw, since its result may simply not be
+    out yet, but it is marked ``held``: its sales are closed, so it gets no buy signal and
+    no suggestions.
     """
     last_no, last_day = _last_stored(ctx, game)
     number = last_no + 1 if last_no > 0 else None
@@ -283,7 +306,8 @@ def next_draw(ctx: Context, game: str) -> NextDraw:
     when = to_sg(getattr(info, "draw_datetime", None))
     if when is not None and (last_day is None or when.date() > last_day):
         nd = NextDraw(game, number, when.date(), when, False)
-        if last_day is not None and nd.day >= today and _draw_day_between(last_day, nd.day, weekdays):
+        if (last_day is not None and nd.day >= today and _draw_day_between(last_day, nd.day, weekdays)
+                and not _fetched_up_to_date(ctx, game)):
             return replace(nd, number=None, stale=True)
     elif last_day is None:
         return NextDraw(game, number, None, None, False)
@@ -291,7 +315,7 @@ def next_draw(ctx: Context, game: str) -> NextDraw:
         d = last_day + timedelta(days=1)
         while d.weekday() not in weekdays:
             d += timedelta(days=1)
-        nd = NextDraw(game, number, d, datetime.combine(d, C.DRAW_TIME, tzinfo=SG), True)
+        nd = NextDraw(game, None, d, datetime.combine(d, C.DRAW_TIME, tzinfo=SG), True)
     if nd.day is None or nd.day >= today:
         return replace(nd, held=True) if nd.when is not None and nd.when < now else nd
     d = today
@@ -696,12 +720,68 @@ def _md_section1(ctx: Context) -> str:
     return "\n\n".join(parts)
 
 
-def _ticket_rows(rows: Sequence[dict]) -> list[list[str]]:
-    return [[
-        clean_text(r.get("game")), fmt_date(r.get("draw_date")), clean_text(r.get("numbers")),
-        clean_text(r.get("bet_type")), dollars(r.get("cost")), clean_text(r.get("result")) or "n/a",
-        dollars(r.get("winnings") or 0.0),
-    ] for r in rows]
+# Corrected tickets: a checked ticket whose row was edited in Tickets.md is checked again and
+# replaces the old check (tickets.sync_ledger). The old result was announced before, so only
+# the difference is new money.
+CORRECTION_HINT = ("A corrected row replaces the ticket already checked, which is no longer counted. "
+                   "If both are real tickets, put the old row back in Tickets.md.")
+
+
+def corrections(ctx: Context) -> dict[str, dict]:
+    """The checked ticket each ticket checked in this run replaced as a corrected row, keyed
+    by the new row's ticket_id (see ``tickets.replaced_rows``). Empty when there is none."""
+    settled = list(ctx.settled_this_run or [])
+    if not settled or not isinstance(ctx.ledger, pd.DataFrame) or ctx.ledger.empty:
+        return {}
+    try:
+        return ticket_ledger.replaced_rows(ctx.ledger, settled)
+    except Exception as exc:  # never let a layout helper break the report
+        log.warning("Corrected tickets could not be matched to the tickets they replaced: %s", exc)
+        return {}
+
+
+def _was(fixes: dict[str, dict], r: dict) -> dict | None:
+    return fixes.get(str(r.get("ticket_id")))
+
+
+def _run_winnings(settled: Sequence[dict], fixes: dict[str, dict]) -> tuple[float, int]:
+    total, count = 0.0, 0
+    for r in settled:
+        won = as_float(r.get("winnings")) or 0.0
+        was = _was(fixes, r)
+        if was is not None:
+            won = max(0.0, won - (as_float(was.get("winnings")) or 0.0))
+        if won > 0:
+            total, count = total + won, count + 1
+    return total, count
+
+
+def run_winnings(ctx: Context) -> tuple[float, int]:
+    """(money won by the tickets checked in this run, how many tickets won it). A corrected
+    ticket counts only what it won above the ticket it replaced, whose win was announced
+    before (never less than nothing)."""
+    return _run_winnings(list(ctx.settled_this_run or []), corrections(ctx))
+
+
+def _correction_note(was: dict) -> str:
+    """ "corrected from 0601 Big $2, was won $500": the ticket a corrected row replaced."""
+    won = as_float(was.get("winnings")) or 0.0
+    return (f"corrected from {clean_text(was.get('numbers'))} {clean_text(was.get('bet_type'))} "
+            f"{dollars(was.get('cost'))}, " + (f"was won {dollars(won)}" if won > 0 else "was no prize"))
+
+
+def _ticket_rows(rows: Sequence[dict], fixes: dict[str, dict] | None = None) -> list[list[str]]:
+    out = []
+    for r in rows:
+        result = clean_text(r.get("result")) or "n/a"
+        was = _was(fixes or {}, r)
+        if was is not None:
+            result = f"{result}, {_correction_note(was)}"
+        out.append([
+            clean_text(r.get("game")), fmt_date(r.get("draw_date")), clean_text(r.get("numbers")),
+            clean_text(r.get("bet_type")), dollars(r.get("cost")), result, dollars(r.get("winnings") or 0.0),
+        ])
+    return out
 
 
 def _totals_md(totals: dict) -> str:
@@ -734,13 +814,23 @@ def _md_section2(ctx: Context) -> str:
     parts.append("### My ticket check")
     settled = list(ctx.settled_this_run or [])
     if settled:
-        won = sum(as_float(r.get("winnings")) or 0.0 for r in settled)
-        winners = sum(1 for r in settled if (as_float(r.get("winnings")) or 0.0) > 0)
-        lead = (f"**You won {dollars(won)}** with {plural(winners, 'ticket')} in this run."
-                if won > 0 else "None of the tickets checked in this run won a prize.")
+        fixes = corrections(ctx)
+        won, winners = _run_winnings(settled, fixes)
+        if won > 0:
+            lead = f"**You won {dollars(won)}** with {plural(winners, 'ticket')} in this run."
+        elif any((as_float(r.get("winnings")) or 0.0) > 0 for r in settled):
+            lead = "Nothing more was won in this run."
+        else:
+            lead = "None of the tickets checked in this run won a prize."
         parts.append(f"{plural(len(settled), 'ticket')} checked in this run. {lead}")
         parts.append(md_table(["Game", "Draw date", "Numbers", "Bet type", "Cost", "Result", "Won"],
-                              _ticket_rows(settled), align="llllrlr"))
+                              _ticket_rows(settled, fixes), align="llllrlr"))
+        if fixes:
+            what = ("1 ticket checked in this run is a corrected row of a ticket already checked, so only "
+                    "what it won above the old check counts" if len(fixes) == 1 else
+                    f"{plural(len(fixes), 'ticket')} checked in this run are corrected rows of tickets already "
+                    "checked, so only what they won above the old checks counts")
+            parts.append(f"{what} as won in this run. {CORRECTION_HINT}")
     else:
         parts.append("No tickets were checked in this run.")
     parts.append(_totals_md(ctx.ledger_totals))
@@ -1093,13 +1183,14 @@ def _tg_fourd_result(ctx: Context) -> str:
     return "\n".join(lines)
 
 
-def _ticket_line(r: dict) -> str:
+def _ticket_line(r: dict, was: dict | None = None) -> str:
     won = as_float(r.get("winnings")) or 0.0
     head = (f"{_h(r.get('game'))} {fmt_date(r.get('draw_date'))}, {_h(r.get('numbers'))}, "
             f"{_h(r.get('bet_type'))} {dollars(r.get('cost'))}")
+    fix = f", {_h(_correction_note(was))}" if was is not None else ""
     if won > 0:
-        return f"{head}: {_h(r.get('result'))}, won <b>{dollars(won)}</b>"
-    return f"{head}: {_h(r.get('result') or 'No prize')}"
+        return f"{head}: {_h(r.get('result'))}{fix}, {'now won' if fix else 'won'} <b>{dollars(won)}</b>"
+    return f"{head}: {_h(r.get('result') or 'No prize')}{fix}"
 
 
 def _no_draw_cost(ctx: Context) -> float:
@@ -1114,24 +1205,34 @@ def _no_draw_cost(ctx: Context) -> float:
 def _tg_tickets(ctx: Context, level: int) -> str:
     lines = ["<b>My tickets</b>"]
     settled = list(ctx.settled_this_run or [])
+    fixes = corrections(ctx)
     winners = sorted((r for r in settled if (as_float(r.get("winnings")) or 0.0) > 0),
                      key=lambda r: -(as_float(r.get("winnings")) or 0.0))
     losers = [r for r in settled if (as_float(r.get("winnings")) or 0.0) <= 0]
-    total_won = sum(as_float(r.get("winnings")) or 0.0 for r in winners)
+    total_won, n_won = _run_winnings(settled, fixes)
     if not settled:
         lines.append("No tickets were checked in this run.")
     elif level == 0:
-        lines += [f"• {_ticket_line(r)}" for r in winners + losers]
+        lines += [f"• {_ticket_line(r, _was(fixes, r))}" for r in winners + losers]
     elif level <= 2:
-        shown = winners if level == 1 else winners[:_TG_WINNERS_CAP]
-        lines += [f"• {_ticket_line(r)}" for r in shown]
+        # A corrected ticket is always listed: it changes a result already announced.
+        shown = [r for k, r in enumerate(winners) if level == 1 or k < _TG_WINNERS_CAP or _was(fixes, r)]
+        fixed_losers = [r for r in losers if _was(fixes, r)]
+        lines += [f"• {_ticket_line(r, _was(fixes, r))}" for r in shown + fixed_losers]
         if len(shown) < len(winners):
             lines.append(f"• and {plural(len(winners) - len(shown), 'more winning ticket')}")
-        if losers:
-            lines.append(f"{plural(len(losers), 'other ticket')} checked won nothing.")
+        if len(losers) > len(fixed_losers):
+            lines.append(f"{plural(len(losers) - len(fixed_losers), 'other ticket')} checked won nothing.")
     else:
-        lines.append(f"{plural(len(settled), 'ticket')} checked, {fmt_num(len(winners))} won, "
+        lines.append(f"{plural(len(settled), 'ticket')} checked, {fmt_num(n_won)} won, "
                      f"{dollars(total_won)} in total.")
+        if fixes:
+            lines.append("1 of them is a corrected row of a ticket already checked, see Ledger.md."
+                         if len(fixes) == 1 else
+                         f"{fmt_num(len(fixes))} of them are corrected rows of tickets already checked, see "
+                         "Ledger.md.")
+    if fixes:
+        lines.append(f"<i>{_h(CORRECTION_HINT)}</i>")
 
     totals = ctx.ledger_totals or {}
     if as_int(totals.get("tickets")):
@@ -1156,10 +1257,8 @@ def _tg_tickets(ctx: Context, level: int) -> str:
 
 
 def _tg_message1(ctx: Context, level: int) -> list[str]:
-    settled = list(ctx.settled_this_run or [])
-    won = sum(as_float(r.get("winnings")) or 0.0 for r in settled)
+    won, n = run_winnings(ctx)
     if won > 0:
-        n = sum(1 for r in settled if (as_float(r.get("winnings")) or 0.0) > 0)
         head = (f"<b>WINNER! Your tickets won {dollars(won)} in this run</b>\n"
                 f"{plural(n, 'winning ticket')}, details below.")
     else:

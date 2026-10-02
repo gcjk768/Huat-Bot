@@ -322,7 +322,7 @@ cannot read is listed in `Ledger.md` with the reason.
 | Fix a typo in a ticket not checked yet | The old row is dropped from the totals and the corrected one is checked. |
 | Correct one field (numbers, bet type or cost) of a ticket already checked | The corrected ticket is checked again and replaces the old one, so it is counted once. |
 | Delete the row of a ticket not checked yet | It leaves the totals; put the row back and it returns. |
-| Delete the row of a ticket already checked | It stays in the ledger, so your spent and won history stays complete. |
+| Delete the row of a ticket already checked | It stays in the ledger, so your spent and won history stays complete. If you add a near identical ticket for the same draw in the same edit, the bot treats it as a correction and says so in `Ledger.md`, with how to undo it. |
 
 ## Schedule and retries
 

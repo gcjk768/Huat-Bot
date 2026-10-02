@@ -226,12 +226,21 @@ def _read_draw_list(fetcher, url: str, label: str) -> list[tuple[int, date | Non
     return draws
 
 
-def latest_on_site(fetcher, game: str) -> tuple[int | None, date | None]:
-    """Latest draw number and date on the site for "toto" or "4d"; (None, None) if unknown."""
+def latest_on_site(fetcher, game: str, strict: bool = False) -> tuple[int | None, date | None]:
+    """Latest draw number and date on the site for "toto" or "4d"; (None, None) if unknown.
+
+    With ``strict`` a network failure (FetchError) is raised instead of returning (None, None),
+    so the scheduler can tell "the site could not be reached" from "the result is not out yet".
+    """
     key = str(game).lower()
     url = C.TOTO_DRAW_LIST_URL if key == "toto" else C.FOURD_DRAW_LIST_URL
     try:
         draws = parse_draw_list(fetcher.get(url))
+    except FetchError:
+        if strict:
+            raise
+        log.warning("Could not reach the %s draw list", GAME_LABELS.get(key, key))
+        return None, None
     except Exception as exc:
         log.warning("Could not read the %s draw list: %s", GAME_LABELS.get(key, key), exc)
         return None, None
@@ -262,7 +271,7 @@ def incomplete_reason(game: str, row: Any) -> str | None:
     return None
 
 
-def latest_complete_date(fetcher, game: str) -> date | None:
+def latest_complete_date(fetcher, game: str, strict: bool = False) -> date | None:
     """Date of the latest draw on the site, but only once its result page is complete.
 
     Reads the draw list and the latest result page. Returns None while the page is missing,
@@ -271,7 +280,7 @@ def latest_complete_date(fetcher, game: str) -> date | None:
     """
     key = str(game).lower()
     label = GAME_LABELS.get(key, key)
-    number, day = latest_on_site(fetcher, key)
+    number, day = latest_on_site(fetcher, key, strict=strict)  # strict: raises if unreachable
     if number is None:
         return None
     is_toto = key == "toto"

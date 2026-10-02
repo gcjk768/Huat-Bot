@@ -41,7 +41,9 @@ state.json keys written here:
                     message 1 listing them went out: a failed post, or a run cut off after the
                     ledger was saved, still reports them in the next message 1
 ``last_logged``     short hashes of the last SUGGEST and SIGNAL rows, so an unchanged
-                    suggestion or signal is not logged again on every run
+                    suggestion or signal is not logged again on every run, and of the last
+                    "Next draws" FETCH row with its time, so the scheduler's refresh and the
+                    run straight after it do not both log the same row
 ``last_run``        when, which games, ok, new draws, dry run or demo
 
 ``demo=True`` uses synthetic history from ``huatbot.synth`` (no network, never posts) and
@@ -123,6 +125,8 @@ LEDGER_LOG_LIMIT = 20  # settled tickets logged one by one
 SKIP_AFTER_FAILED_RUNS = 3  # a draw page failing in this many runs goes on the skip list
 SKIP_PROTECT_NEWEST = 10  # ... unless it is one of the newest draws on the site
 PRIZE_RULES_MAX_AGE_DAYS = 7
+NEXT_DRAWS_LOG_KEY = "FETCH next draws"  # state["last_logged"] entry of the "Next draws" row
+NEXT_DRAWS_REPEAT_WINDOW = timedelta(minutes=5)  # the same row this soon after is not logged again
 BACKTEST_CACHE_VERSION = 1
 
 # Demo history: about as long as needed for a 300 draw backtest with 100 draws of warm up.
@@ -436,6 +440,22 @@ def _next_draws_text(nt: NextToto | None, nf: NextFourD | None) -> str:
     return "; ".join(parts) if parts else "the next draw pages could not be read"
 
 
+def _log_next_draws(log_fn: Callable[[str, str], Any], state: dict, nt: NextToto | None,
+                    nf: NextFourD | None, now: datetime) -> None:
+    """Log the "Next draws" FETCH row, unless the same row was logged less than
+    NEXT_DRAWS_REPEAT_WINDOW ago (the scheduler refreshes the next draws just before it runs,
+    and the run reads them again)."""
+    message = f"Next draws: {_next_draws_text(nt, nf)}"
+    digest = hashlib.sha1(message.encode("utf-8")).hexdigest()[:12]
+    seen = state.get("last_logged") if isinstance(state.get("last_logged"), dict) else {}
+    last_digest, _, last_at = str(seen.get(NEXT_DRAWS_LOG_KEY) or "").partition(" ")
+    last = _parse_dt(last_at)
+    if last_digest == digest and last is not None and timedelta(0) <= now - last < NEXT_DRAWS_REPEAT_WINDOW:
+        return
+    log_fn(EV_FETCH, message)
+    state["last_logged"] = {**seen, NEXT_DRAWS_LOG_KEY: f"{digest} {now.isoformat(timespec='seconds')}"}
+
+
 def refresh_next_draws(vault: Vault | str | Path | None, fetcher, *, now: datetime | None = None,
                        log_activity: bool = True) -> dict:
     """Read the next draw pages, store them in state.json and return the state.
@@ -449,9 +469,9 @@ def refresh_next_draws(vault: Vault | str | Path | None, fetcher, *, now: dateti
     toto = store.load_toto(vault.toto_csv)
     nt, nf = site.fetch_next_draws(fetcher, toto)
     _store_next_draws(state, nt, nf, now)
-    vault.save_state(state)
     if log_activity:
-        vault.log(EV_FETCH, f"Next draws: {_next_draws_text(nt, nf)}", when=now)
+        _log_next_draws(lambda event, message: vault.log(event, message, when=now), state, nt, nf, now)
+    vault.save_state(state)
     return state
 
 
@@ -1012,6 +1032,8 @@ def _log_suggestions(ctx: Context, activity: _Activity, state: dict | None = Non
         if plan is None:
             continue
         nd = report.next_draw(ctx, game)
+        if nd.held:  # its sales are closed: no plan for it (the one logged before the draw stands)
+            continue
         draw = f" draw {nd.number}" if nd.number else ""
         if plan.lines:
             picks = ", ".join(f"{ln.label} {ln.numbers}" for ln in plan.lines)
@@ -1021,24 +1043,42 @@ def _log_suggestions(ctx: Context, activity: _Activity, state: dict | None = Non
             text = f"{LABELS[game]}{draw}: nothing to buy ({_plain(' '.join(plan.notes[:1]))})"
         _log_changed(activity, state, EV_SUGGEST, f"{EV_SUGGEST} {game}", text)
     sig = ctx.buy_signal
-    if sig is not None:
+    if sig is not None and not report.next_draw(ctx, "toto").held:
         jackpot = money(sig.jackpot) if sig.jackpot is not None else "not known"
         ev = f", return per $1 about {per_dollar(sig.ev_per_dollar)}" if sig.ev_per_dollar is not None else ""
         _log_changed(activity, state, EV_SIGNAL, EV_SIGNAL, f"Buy signal {sig.label} for the next TOTO draw: "
                                                             f"jackpot {jackpot}, {sig.draw_type} draw{ev}")
 
 
+def _commentary_figures(ctx: Context) -> dict:
+    """The commentary figures without the parts about a draw already held (``NextDraw.held``):
+    its sales are closed, so it has no jackpot, buy signal or suggestions to write about."""
+    figures = commentary.figures_from_context(ctx)
+    if report.next_draw(ctx, "toto").held:
+        for key in ("next_toto", "buy_signal", "toto_suggestions"):
+            figures.pop(key, None)
+    if report.next_draw(ctx, "4d").held:
+        figures.pop("4d_suggestions", None)
+    return figures
+
+
 def _commentary(ctx: Context, demo: bool, activity: _Activity | None = None) -> str | None:
-    """The optional commentary. When COMMENTARY is turned on but nothing usable came back, an
-    ERROR row says so (the container log has the reason)."""
+    """The optional commentary, as the report and message 3 show it (``report.commentary_text``
+    drops sentences that restate the odds). When COMMENTARY is turned on but nothing usable
+    came back, an ERROR row says so (the container log has the reason)."""
     if demo:
         return None  # a demo never calls out to claude
     try:
-        text = commentary.build_commentary(commentary.figures_from_context(ctx))
+        text = commentary.build_commentary(_commentary_figures(ctx))
         reason = "the container log says why"
     except Exception as exc:  # optional extra, never fatal
         log.warning("Commentary skipped: %s", exc)
         text, reason = None, _error_text(exc)
+    if text:
+        kept = report.commentary_text(text)
+        if not kept:
+            reason = "the reply only restated the odds, which the messages already say once"
+        text = kept or None
     if text is None and activity is not None and commentary.is_enabled():
         activity(EV_ERROR, f"Commentary is turned on but none was added in this run ({reason})")
     return text
@@ -1272,7 +1312,7 @@ def run(games=GAMES, *, dry_run: bool = False, fetch: bool = True, post: bool = 
             if fetch:
                 nt, nf = site.fetch_next_draws(fetcher, data.toto)
                 _store_next_draws(state, nt, nf, now)
-                activity(EV_FETCH, f"Next draws: {_next_draws_text(nt, nf)}")
+                _log_next_draws(activity, state, nt, nf, now)
             stored_nt, stored_nf = next_draws_from_state(state, data.toto, data.fourd)
             nt, nf = nt or stored_nt, nf or stored_nf
             last_toto, last_fourd = _latest_date(data.toto), _latest_date(data.fourd)
@@ -1334,7 +1374,8 @@ def run(games=GAMES, *, dry_run: bool = False, fetch: bool = True, post: bool = 
         report_md = report.full_report(ctx)
         notes.write_all(vault, ctx, report_md)
         _rewrite_repaired_notes(vault, data, activity)
-        result.report_path = str(vault.path(notes.report_note_path(ctx.now)))
+        # A rerun whose report only differs in its time keeps the earlier report note.
+        result.report_path = str(vault.path(notes.report_rel(vault, ctx, report_md)))
         messages = report.telegram_messages(ctx)
         result.messages = messages
 
@@ -1399,6 +1440,7 @@ def fetch_data(games=GAMES, *, vault: Vault | str | Path | None = None, fetcher=
     try:
         activity(EV_RUN, f"Fetch started for {_games_text(games)}")
         data = _update_from_site(vault, settings, state, games, fetcher, now, activity, warnings)
+        _rewrite_repaired_notes(vault, data, activity)
         nt, nf = site.fetch_next_draws(fetcher, data.toto)
         _store_next_draws(state, nt, nf, now)
         activity(EV_FETCH, f"Next draws: {_next_draws_text(nt, nf)}")

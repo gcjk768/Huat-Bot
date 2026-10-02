@@ -18,6 +18,7 @@ from huatbot import prizes
 from huatbot.models import LEDGER_COLUMNS, PrizeRules, Ticket
 from huatbot.store import empty_ledger, load_ledger, save_ledger
 from huatbot.tickets import (
+    LEFT_NOTE_MARK,
     REMOVED_RESULT,
     REPLACED_PREFIX,
     TICKETS_TEMPLATE,
@@ -25,6 +26,7 @@ from huatbot.tickets import (
     ledger_totals,
     parse_date,
     parse_tickets,
+    replaced_rows,
     settle_ledger,
     settled_rows,
     sync_ledger,
@@ -723,7 +725,8 @@ def test_editing_the_cost_of_a_checked_ticket_counts_it_once(toto_df, fourd_df, 
     assert len(led) == 2
     old, new = led.iloc[0], led.iloc[1]
     assert old["status"] == "invalid"
-    assert old["result"] == f"{REPLACED_PREFIX} (was: Group 7 x1, won ${g7:,.0f})"
+    assert old["result"] == (f"{REPLACED_PREFIX}: {nums} Ordinary $2 (was: Group 7 x1, won ${g7:,.0f}). "
+                             "If both are real tickets, put this row back in Tickets.md")
     assert old["winnings"] == pytest.approx(g7)  # kept for the record, not counted
     assert new["status"] == "settled" and new["winnings"] == pytest.approx(2 * g7)
     assert [r["ticket_id"] for r in settled] == [new["ticket_id"]]
@@ -796,6 +799,109 @@ def test_deleting_checked_rows_without_a_matching_new_line_keeps_them(toto_df, f
     assert first["numbers"] == nums and first["draw_date"] == day and first["status"] == "settled"
     assert not led["result"].str.startswith(REPLACED_PREFIX).any()
     assert ledger_totals(led)["tickets"] == 3
+
+
+# A checked row deleted in one run, and a similar ticket for the same draw added later
+
+
+def test_a_checked_row_deleted_earlier_is_never_replaced_by_a_later_ticket(toto_df, fourd_df, rules):
+    row = fourd_df.iloc[-5]
+    d = iso(row["draw_date"])
+    first = row["first"]
+    led, settled = settle_note(empty_ledger(), note(f"| 4D | {d} | {first} | Big | $1 |"),
+                               toto_df, fourd_df, rules, NOW)
+    big_won = settled[0]["winnings"]
+    assert big_won == pytest.approx(rules.fourd_prizes["big"]["first"])
+    checked_at = led.loc[0, "checked_at"]
+
+    # The user tidies Tickets.md: the checked row is deleted, the table stays.
+    led, _ = settle_note(led, note(), toto_df, fourd_df, rules, NOW + timedelta(days=1))
+    assert led.loc[0, "status"] == "settled"
+    assert led.loc[0, "checked_at"].startswith(checked_at) and LEFT_NOTE_MARK in led.loc[0, "checked_at"]
+    # An empty or unreadable note leaves the mark alone; syncing the same note again changes nothing.
+    pd.testing.assert_frame_equal(sync_ledger(led, [], NOW + timedelta(days=2), note_read=False), led)
+    pd.testing.assert_frame_equal(settle_note(led, note(), toto_df, fourd_df, rules, NOW + timedelta(days=2))[0], led)
+
+    # Days later, two more tickets bought for the same draw are recorded: the same number Small,
+    # and the same digits in another order Big. Both look like edits of the deleted row.
+    perm = next((p for p in (first[::-1], first[1:] + first[0]) if p != first), None)
+    later = [f"| 4D | {d} | {first} | Small | $1 |"] + ([f"| 4D | {d} | {perm} | Big | $1 |"] if perm else [])
+    led, settled = settle_note(led, note(*later), toto_df, fourd_df, rules, NOW + timedelta(days=3))
+    assert len(settled) == len(later)
+    assert led.loc[0, "status"] == "settled" and led.loc[0, "winnings"] == pytest.approx(big_won)
+    assert not led["result"].str.startswith(REPLACED_PREFIX).any()
+    assert replaced_rows(led, settled) == {}
+    totals = ledger_totals(led)
+    assert totals["tickets"] == 1 + len(later) and totals["spent"] == pytest.approx(1.0 + len(later))
+    assert totals["won"] == pytest.approx(big_won + sum(r["winnings"] for r in settled))
+
+
+def test_deleting_a_checked_row_and_later_adding_another_ticket_keeps_both(toto_df, fourd_df, rules):
+    row = fourd_df.iloc[-5]
+    d = iso(row["draw_date"])
+    first = row["first"]
+    similar = first[:3] + str((int(first[3]) + 1) % 10)  # one digit apart: looks like a typo fix
+    other = "| TOTO | 5 Oct 2030 | 1 2 3 4 5 6 | Ordinary | $1 |"
+    led, settled = settle_note(empty_ledger(), note(f"| 4D | {d} | {first} | Big | $1 |", other),
+                               toto_df, fourd_df, rules, NOW)
+    won = settled[0]["winnings"]
+    led, _ = settle_note(led, note(other), toto_df, fourd_df, rules, NOW + timedelta(days=1))
+    led, settled = settle_note(led, note(other, f"| 4D | {d} | {similar} | Big | $1 |"),
+                               toto_df, fourd_df, rules, NOW + timedelta(days=2))
+    assert led.loc[0, "status"] == "settled"
+    totals = ledger_totals(led)
+    assert totals["tickets"] == 3 and totals["spent"] == pytest.approx(3.0)
+    assert totals["won"] == pytest.approx(won + settled[0]["winnings"])
+
+
+def test_deleting_a_checked_row_and_adding_a_similar_one_together_is_a_correction(toto_df, fourd_df, rules):
+    row = fourd_df.iloc[-5]
+    d = iso(row["draw_date"])
+    first = row["first"]
+    similar = first[:3] + str((int(first[3]) + 1) % 10)
+    led, settled = settle_note(empty_ledger(), note(f"| 4D | {d} | {first} | Big | $1 |"),
+                               toto_df, fourd_df, rules, NOW)
+    won = settled[0]["winnings"]
+    led, settled = settle_note(led, note(f"| 4D | {d} | {similar} | Big | $1 |"),
+                               toto_df, fourd_df, rules, NOW + timedelta(days=1))
+    old = led.iloc[0]
+    assert old["status"] == "invalid"
+    assert old["result"] == (f"{REPLACED_PREFIX}: {similar} Big $1 (was: 1st Prize x1, won ${won:,.0f}). "
+                             "If both are real tickets, put this row back in Tickets.md")
+    pairs = replaced_rows(led, settled)
+    assert list(pairs) == [settled[0]["ticket_id"]]
+    was = pairs[settled[0]["ticket_id"]]
+    assert was["numbers"] == first and was["winnings"] == pytest.approx(won) and was["status"] == "invalid"
+    assert replaced_rows(led, []) == {}
+
+
+def test_a_deleted_checked_row_that_comes_back_can_be_edited_again(toto_df, fourd_df, rules):
+    row = toto_df.iloc[-3]
+    line = f"| TOTO | {iso(row['draw_date'])} | {group7_numbers(row)} | Ordinary | $1 |"
+    led, _ = settle_note(empty_ledger(), note(line), toto_df, fourd_df, rules, NOW)
+    checked_at = led.loc[0, "checked_at"]
+    led, _ = settle_note(led, note(), toto_df, fourd_df, rules, NOW + timedelta(days=1))
+    assert LEFT_NOTE_MARK in led.loc[0, "checked_at"]
+    led, _ = settle_note(led, note(line), toto_df, fourd_df, rules, NOW + timedelta(days=2))
+    assert led.loc[0, "checked_at"] == checked_at  # back in the note: the mark is gone
+    led, _ = settle_note(led, note(line.replace("$1", "$2")), toto_df, fourd_df, rules, NOW + timedelta(days=3))
+    assert list(led["status"]) == ["invalid", "settled"]
+    assert ledger_totals(led)["tickets"] == 1
+
+
+def test_an_edit_first_saved_with_a_typo_still_replaces_the_checked_row(toto_df, fourd_df, rules):
+    row = toto_df.iloc[-3]
+    line = f"| TOTO | {iso(row['draw_date'])} | {group7_numbers(row)} | Ordinary | $1 |"
+    led, _ = settle_note(empty_ledger(), note(line), toto_df, fourd_df, rules, NOW)
+    # The bot runs while the edited row cannot be read (the cost is being retyped).
+    typo = line.replace("$1", "$")
+    assert parse_tickets(note(typo))[0].error
+    led, _ = settle_note(led, note(typo), toto_df, fourd_df, rules, NOW + timedelta(days=1))
+    assert led.loc[0, "status"] == "settled" and LEFT_NOTE_MARK not in led.loc[0, "checked_at"]
+    led, _ = settle_note(led, note(line.replace("$1", "$2")), toto_df, fourd_df, rules, NOW + timedelta(days=2))
+    assert list(led["status"]) == ["invalid", "settled"]
+    totals = ledger_totals(led)
+    assert totals["tickets"] == 1 and totals["spent"] == pytest.approx(2.0)
 
 
 def test_settled_rows_returns_checked_rows_in_order(toto_df, fourd_df, rules):

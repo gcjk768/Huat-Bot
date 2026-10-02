@@ -456,7 +456,8 @@ def test_odds_note_content():
 
 def test_next_draw_falls_back_to_schedule(ctx):
     nd = report.next_draw(variant(ctx, next_toto=None), "toto")
-    assert nd.number == 4124 and str(nd.day) == "2026-10-05" and nd.from_schedule
+    # No number for a schedule date: a special draw before it would take 4124.
+    assert nd.number is None and str(nd.day) == "2026-10-05" and nd.from_schedule and not nd.stale
     stale = report.next_draw(ctx, "4d")
     assert stale.number == 5433 and str(stale.day) == "2026-10-03" and not stale.from_schedule
 
@@ -565,6 +566,73 @@ def test_message1_mentions_tickets_dated_on_a_day_without_a_draw(ctx):
     assert "2 tickets ($6) have no draw on their date and still count as spent." in msg2
 
 
+# A checked ticket corrected in Tickets.md
+
+
+def _corrected(ctx, before: list[str], after: list[str]):
+    """``ctx`` after two runs: ``before`` rows checked on Wed 30 Sep, then the note changed to
+    ``after`` and checked again in this run (ctx.now)."""
+    from huatbot import tickets
+    head = "| Game | Draw date | Numbers | Bet type | Cost |\n| --- | --- | --- | --- | --- |\n"
+    ledger = empty_ledger()
+    for rows, when in ((before, _sg(2026, 9, 30, 19, 30)), (after, ctx.now)):
+        text = head + "".join(r + "\n" for r in rows)
+        ledger = tickets.sync_ledger(ledger, tickets.parse_tickets(text), when, note_read=True)
+        ledger, settled = tickets.settle_ledger(ledger, ctx.toto, ctx.fourd, ctx.rules, when)
+    return variant(ctx, ledger=ledger, ledger_totals=ledger_totals(ledger), settled_this_run=settled,
+                   bad_ticket_lines=[])
+
+
+def _group7(ctx) -> str:
+    row = report.latest_row(ctx.toto)
+    win = toto_numbers(row)
+    others = [n for n in range(1, 50) if n not in win and n != int(row["additional"])]
+    return " ".join(str(n) for n in sorted(win[:3] + others[:3]))
+
+
+def test_a_corrected_ticket_counts_only_what_it_won_above_the_old_check(ctx):
+    first = report.latest_row(ctx.fourd)["first"]
+    big = ctx.rules.fourd_prizes["big"]["first"]
+    g7 = float(report.latest_row(ctx.toto)["g7_share"])
+    c = _corrected(ctx, [f"| 4D | 30 Sep 2026 | {first} | Big | $2 |"],
+                   [f"| 4D | 30 Sep 2026 | {first} | Big | $3 |", f"| TOTO | 1 Oct 2026 | {_group7(ctx)} | Ordinary | $1 |"])
+    assert len(c.settled_this_run) == 2
+    assert report.run_winnings(c) == (pytest.approx(big + g7), 2)
+    msg = report.telegram_messages(c)[0]
+    assert msg.startswith(f"<b>WINNER! Your tickets won {report.dollars(big + g7)} in this run</b>")
+    assert (f"4D Wed 30 Sep 2026, {first}, Big $3: 1st Prize x1, corrected from {first} Big $2, was won "
+            f"{report.dollars(2 * big)}, now won <b>{report.dollars(3 * big)}</b>") in msg
+    assert report.CORRECTION_HINT in msg
+    assert f"spent $4, won {report.dollars(3 * big + g7)}" in msg
+    assert_valid_message(msg)
+    section = report.full_report(c).split(report.SECTION_HEADINGS[1])[1].split(report.SECTION_HEADINGS[2])[0]
+    assert f"**You won {report.dollars(big + g7)}** with 2 tickets in this run." in section
+    assert f"1st Prize x1, corrected from {first} Big $2, was won {report.dollars(2 * big)}" in section
+    assert report.CORRECTION_HINT in section
+    assert not has_prose_dashes(section)
+    # Without a correction nothing changes.
+    assert "corrected" not in report.telegram_messages(ctx)[0]
+    assert report.run_winnings(ctx)[0] == pytest.approx(sum(r["winnings"] for r in ctx.settled_this_run))
+
+
+def test_a_checked_winner_corrected_into_a_loser_is_announced(ctx):
+    row = report.latest_row(ctx.fourd)
+    first = row["first"]
+    drawn = {n for tier in fourd_numbers(row).values() for n in tier}
+    loser = next(first[:3] + str(d) for d in range(10) if first[:3] + str(d) not in drawn)
+    big = ctx.rules.fourd_prizes["big"]["first"]
+    c = _corrected(ctx, [f"| 4D | 30 Sep 2026 | {first} | Big | $1 |"], [f"| 4D | 30 Sep 2026 | {loser} | Big | $1 |"])
+    assert report.run_winnings(c) == (0.0, 0)
+    line = f"4D Wed 30 Sep 2026, {loser}, Big $1: No prize, corrected from {first} Big $1, was won {report.dollars(big)}"
+    msg = report.telegram_messages(c)[0]
+    assert "WINNER" not in msg and line in msg and report.CORRECTION_HINT in msg
+    for level in (1, 2):  # a corrected ticket is listed even when losing tickets are not
+        assert line in report._tg_tickets(c, level)
+    compact = report._tg_tickets(c, 3)
+    assert "1 of them is a corrected row of a ticket already checked, see Ledger.md." in compact
+    assert report.CORRECTION_HINT in compact
+
+
 # Missed draws of the game this run did not fetch
 
 
@@ -626,6 +694,55 @@ def test_next_toto_draw_after_a_missed_toto_draw_has_no_number(ctx):
     paths = _suggestion_paths(c)
     assert "Suggestions/2026-10-10 4D 5436.md" in paths
     assert not any("TOTO" in p for p in paths)  # no "2026-10-08 TOTO 4124.md"
+
+
+def test_schedule_date_after_a_lagging_next_draw_page_has_no_number(ctx):
+    # Mon 5 Oct 7.45pm: TOTO 4124 is stored and the next draw page still shows it. Thu 8 Oct is
+    # the next regular draw day, but a special draw before it would be 4125: no number is given,
+    # and no suggestion note is filed under a number that may be wrong.
+    toto = _with_draw(ctx.toto, 4124, date(2026, 10, 5))
+    fourd = _with_draw(_with_draw(ctx.fourd, 5433, date(2026, 10, 3)), 5434, date(2026, 10, 4))
+    c = variant(ctx, toto=toto, fourd=fourd, now=_sg(2026, 10, 5, 19, 45), games_drawn=("toto",),
+                new_draws={"toto": [4124]}, next_fourd=NextFourD(_sg(2026, 10, 7, 18, 30)),
+                next_toto=NextToto(_sg(2026, 10, 5, 18, 30), 1_000_000.0, "normal", None))
+    nd = report.next_draw(c, "toto")
+    assert nd.from_schedule and nd.number is None and not nd.stale and str(nd.day) == "2026-10-08"
+    msgs = report.telegram_messages(c)
+    assert "<b>Next TOTO draw</b>: Thu 8 Oct 2026, 6.30pm (regular schedule, not announced yet)" in msgs[1]
+    assert "<b>TOTO next draw</b>, budget" in msgs[2]
+    for msg in msgs:
+        assert "draw 4125" not in msg and "4125)" not in msg
+        assert_valid_message(msg)
+    paths = _suggestion_paths(c)
+    assert not any("TOTO" in p for p in paths) and "Suggestions/2026-10-07 4D 5435.md" in paths
+
+
+def test_page_date_after_a_moved_draw_keeps_its_number_when_results_are_up_to_date(ctx):
+    # Mon 5 Oct: this run read TOTO 4124 from the site, the newest draw there. The next draw page
+    # says Fri 9 Oct 9.30pm (a Hongbao draw held in place of Thursday's): the regular Thursday in
+    # between had no draw, so the results are up to date and the Friday draw is 4125.
+    toto = _with_draw(ctx.toto, 4124, date(2026, 10, 5))
+    fourd = _with_draw(_with_draw(ctx.fourd, 5433, date(2026, 10, 3)), 5434, date(2026, 10, 4))
+    c = variant(ctx, toto=toto, fourd=fourd, now=_sg(2026, 10, 5, 19, 45), games_drawn=("toto",),
+                new_draws={"toto": [4124]}, next_fourd=NextFourD(_sg(2026, 10, 7, 18, 30)),
+                next_toto=NextToto(_sg(2026, 10, 9, 21, 30), 4_000_000.0, "hongbao", "hongbao"))
+    nd = report.next_draw(c, "toto")
+    assert nd.number == 4125 and not nd.stale and not nd.from_schedule and str(nd.day) == "2026-10-09"
+    assert report._stale_text(c) is None
+    msgs = report.telegram_messages(c)
+    assert "not up to date" not in msgs[0] and "not up to date" not in msgs[1]
+    assert "<b>Next TOTO draw</b> (draw 4125): Fri 9 Oct 2026, 9.30pm" in msgs[1]
+    assert "<b>TOTO draw 4125, Fri 9 Oct 2026</b>" in msgs[2]
+    assert "Suggestions/2026-10-09 TOTO 4125.md" in _suggestion_paths(c)
+    # Still marked stale when the site has a newer draw than the stored ones, or when this run
+    # did not read TOTO from the site.
+    behind = variant(c, warnings=["TOTO: the newest stored draw (4124) does not match the latest draw on "
+                                  "the site (4125)."])
+    not_read = variant(c, games_drawn=("4d",), new_draws={"4d": [5434]})
+    fetch_failed = variant(c, new_draws={})
+    for other in (behind, not_read, fetch_failed):
+        nd = report.next_draw(other, "toto")
+        assert nd.stale and nd.number is None and str(nd.day) == "2026-10-09"
 
 
 def test_next_draw_page_without_missed_draws_keeps_its_number(ctx):

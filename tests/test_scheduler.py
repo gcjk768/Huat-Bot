@@ -621,3 +621,60 @@ def test_serve_remembers_a_special_draw_after_a_restart(tmp_path):
     state = vault.load_state()
     assert state["next_draws"]["toto"]["draw_datetime"].startswith("2026-10-12")
     assert state["upcoming_draws"]["toto"] == ["2026-10-09", "2026-10-12"]
+
+
+def test_serve_says_the_site_could_not_be_reached_when_every_check_failed():
+    # Mon 26 Oct: every request fails from 7pm to 11pm, so no check learns whether TOTO is out.
+    clock = FakeClock(sg(2026, 10, 26, 10, 0))
+    rec = Recorder(clock)
+
+    def down(game):
+        rec.checks.append((game, clock.now()))
+        raise ConnectionError("HTTP 503")
+
+    serve(rec.run, down, rec.refresh, rec.notify, rec.log, clock.now, clock.sleep, SchedulerConfig(), max_cycles=1)
+    assert rec.runs == [] and len(rec.checks) == 13
+    assert rec.notices == [
+        "TOTO result for Mon 26 Oct 2026 could not be checked: the Singapore Pools site could not be reached after "
+        "checking every 10 minutes for 2 hours, so it was not posted. It will be stored on the next TOTO run but "
+        "not posted."
+    ]
+    assert rec.events("ERROR") == rec.notices
+    assert rec.events("WAIT") == []
+    assert "still not on the Singapore Pools site" not in rec.notices[0]
+    assert not any(ch in rec.notices[0] for ch in DASHES)
+
+
+def test_serve_blames_the_publisher_once_a_check_reached_the_site():
+    # One check got through (the result was not out), the rest failed: the result is missing.
+    clock = FakeClock(sg(2026, 10, 26, 10, 0))
+    rec = Recorder(clock)
+    calls = {"n": 0}
+
+    def flaky(game):
+        calls["n"] += 1
+        if calls["n"] > 1:
+            raise ConnectionError("HTTP 503")
+        return previous_draw(clock.now().date())
+
+    serve(rec.run, flaky, rec.refresh, rec.notify, rec.log, clock.now, clock.sleep, SchedulerConfig(), max_cycles=1)
+    assert len(rec.notices) == 1 and "is still not on the Singapore Pools site" in rec.notices[0]
+    assert rec.events("WAIT") == rec.notices and rec.events("ERROR") == []
+
+
+def test_serve_notice_says_posting_failed_when_only_telegram_was_down():
+    # Sat 24 Oct: the 4D result is fetched and stored at 7.30pm, but Telegram is down all evening.
+    class Result:
+        ok = False
+        messages = ["1", "2", "3"]
+
+    clock = FakeClock(sg(2026, 10, 24, 10, 0))
+    rec = Recorder(clock, latest={"4d": published_today})
+    serve(lambda games: Result(), rec.check, rec.refresh, rec.notify, rec.log, clock.now, clock.sleep,
+          SchedulerConfig(), max_cycles=1, done_fn=Done(False))
+    assert rec.notices == [
+        "4D result for Sat 24 Oct 2026 is on the Singapore Pools site but could not be posted to Telegram after "
+        "checking every 10 minutes for 2 hours. See the activity log."
+    ]
+    assert rec.events("ERROR") == rec.notices
+    assert "fetched" not in rec.notices[0]

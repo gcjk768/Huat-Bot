@@ -45,9 +45,14 @@ TOTO_BET_TYPES = ("Ordinary",) + tuple(f"System {n}" for n in sorted(C.TOTO_SYST
 # before the draw was checked. Rows with this text come back if the line comes back.
 REMOVED_RESULT = "Removed from Tickets.md before it was checked"
 # Start of the result text of a checked ledger row that ``sync_ledger`` retired because the
-# user edited its line in Tickets.md (a corrected ticket). The old result and winnings follow
-# in brackets. Rows with this text come back if the original line comes back.
+# user edited its line in Tickets.md (a corrected ticket). The corrected line, the old result
+# and winnings follow. Rows with this text come back if the original line comes back.
 REPLACED_PREFIX = "Replaced by an edited line in Tickets.md"
+# Added to the checked_at stamp of a checked (settled) ledger row once a sync finds its line
+# gone from Tickets.md, with the time of that sync. The row was deleted, not edited: a ticket
+# for the same draw added later is a separate ticket and never replaces it. The mark goes
+# when the line comes back. ledger.csv has no column for it, so it rides on checked_at.
+LEFT_NOTE_MARK = "left Tickets.md"
 
 # Template
 
@@ -66,11 +71,13 @@ on, up to System 12). For 4D, the 4 digit number with any leading zeros, such as
 
 Old rows can stay: a ticket that has been checked stays in the ledger even if you delete its \
 row later. To fix a ticket that was already checked, edit its row, changing only the numbers, \
-the bet type or the cost: the bot then replaces the old check with the corrected one. A wrong \
-draw date, or a fix to more than one of these, is the exception: fix the row here, then delete \
-the old row from Data/ledger.csv while the bot is stopped. Deleting a row before its draw is \
-checked takes it out of the totals. If a row cannot be read, [[Ledger]] lists it with the \
-reason, so you can fix it.
+the bet type or the cost: the bot then replaces the old check with the corrected one. It can \
+only tell an edit by timing: a checked row deleted and a similar ticket for the same draw added \
+before the next run is read as a correction, and the bot says so in its results message. If \
+both are real tickets, put the old row back. A wrong draw date, or a fix to more than one of \
+these, is the exception: fix the row here, then delete the old row from Data/ledger.csv while \
+the bot is stopped. Deleting a row before its draw is checked takes it out of the totals. If a \
+row cannot be read, [[Ledger]] lists it with the reason, so you can fix it.
 
 | Game | Draw date | Numbers | Bet type | Cost |
 | --- | --- | --- | --- | --- |
@@ -714,31 +721,84 @@ def _numbers_alike(game: str, a: str, b: str) -> bool:
     return _in_common(game, a, b) >= 2 or sorted(a) == sorted(b)
 
 
-def _edited_rows(df: pd.DataFrame, incoming: list[tuple], current: set[str]) -> list[int]:
-    """Checked rows replaced by an edited line. Each incoming ticket key (a new or restored
-    line, in note order) takes at most one settled row whose line has left the note: same game
-    and draw date, and at most one of numbers, bet type and cost different (different numbers
-    must still look alike). Closest first (fewest differences, then most numbers in common),
-    then the earliest ledger row. One to one. Returns the replaced row indexes."""
-    gone = [i for i in df.index if df.at[i, "status"] == "settled" and df.at[i, "ticket_id"] not in current]
-    keys = {i: _row_key(df.loc[i]) for i in gone}
-    replaced: list[int] = []
-    for key in incoming:
+def _checked_stamp(value: Any) -> str:
+    """A ledger checked_at value without its ``LEFT_NOTE_MARK`` part."""
+    return str(value or "").partition(LEFT_NOTE_MARK)[0].rstrip(" ;")
+
+
+def _left_note(value: Any) -> bool:
+    """True when a ledger checked_at value carries ``LEFT_NOTE_MARK``."""
+    return LEFT_NOTE_MARK in str(value or "")
+
+
+def _key_text(key: tuple) -> str:
+    """ "0601 Big $3": numbers, bet type and cost of a ``_canonical`` key."""
+    try:
+        cost = _dollars(float(key[4]))
+    except (TypeError, ValueError):
+        cost = str(key[4])
+    return f"{key[2]} {key[3]} {cost}"
+
+
+def _match_edits(incoming: list[tuple], old: dict[int, tuple]) -> list[tuple[int, int]]:
+    """Pairs (position in ``incoming``, ledger row of ``old``). Each incoming ticket key, in
+    order, takes at most one old row (ledger index -> key): same game and draw date, and at
+    most one of numbers, bet type and cost different (different numbers must still look
+    alike). Closest first (fewest differences, then most numbers in common), then the
+    earliest ledger row. One to one."""
+    left = list(old)
+    pairs: list[tuple[int, int]] = []
+    for pos, key in enumerate(incoming):
         best = None
-        for i in gone:
-            old = keys[i]
-            if old[:2] != key[:2]:
+        for i in left:
+            prev = old[i]
+            if prev[:2] != key[:2]:
                 continue
-            diff = sum(old[k] != key[k] for k in (2, 3, 4))
-            if diff > 1 or (old[2] != key[2] and not _numbers_alike(key[0], old[2], key[2])):
+            diff = sum(prev[k] != key[k] for k in (2, 3, 4))
+            if diff > 1 or (prev[2] != key[2] and not _numbers_alike(key[0], prev[2], key[2])):
                 continue
-            rank = (diff, -_in_common(key[0], old[2], key[2]), i)
+            rank = (diff, -_in_common(key[0], prev[2], key[2]), i)
             if best is None or rank < best:
                 best = rank
         if best is not None:
-            gone.remove(best[2])
-            replaced.append(best[2])
-    return replaced
+            left.remove(best[2])
+            pairs.append((pos, best[2]))
+    return pairs
+
+
+def _edited_rows(df: pd.DataFrame, incoming: list[tuple], current: set[str]) -> list[tuple[int, int]]:
+    """Checked rows replaced by an edited line, as (position in ``incoming``, ledger row).
+
+    Each incoming ticket key (a new or restored line, in note order) can take a settled row
+    whose line left the note in this sync (see ``_match_edits``). A row whose line was
+    already gone at an earlier sync carries ``LEFT_NOTE_MARK``: it was deleted, not edited,
+    so a ticket for the same draw added later is a separate ticket and never replaces it."""
+    gone = {i: _row_key(df.loc[i]) for i in df.index
+            if df.at[i, "status"] == "settled" and df.at[i, "ticket_id"] not in current
+            and not _left_note(df.at[i, "checked_at"])}
+    return _match_edits(incoming, gone)
+
+
+def _could_be(t: Ticket, row: Any) -> bool:
+    """True when the unreadable line ``t`` could be the ledger row: same game and draw date,
+    or ones that could not be read."""
+    game = str(t.game or "").strip().upper()
+    day = t.draw_date.isoformat() if isinstance(t.draw_date, date) else ""
+    return ((game not in GAMES or game == str(row["game"]).strip().upper())
+            and (not day or day == str(row["draw_date"]).strip()))
+
+
+def _mark_left_note(df: pd.DataFrame, current: set[str], stamp: str, unreadable: list[Ticket]) -> None:
+    """After a sync that read the note: add ``LEFT_NOTE_MARK`` to settled rows whose line is
+    gone and clear it from rows whose line is back. A row an unreadable line could be is not
+    marked yet, since that line may be its edit (it is marked once the note reads cleanly)."""
+    for i in df.index[df["status"] == "settled"]:
+        value = str(df.at[i, "checked_at"] or "")
+        if df.at[i, "ticket_id"] in current:
+            if _left_note(value):
+                df.at[i, "checked_at"] = _checked_stamp(value)
+        elif not _left_note(value) and not any(_could_be(t, df.loc[i]) for t in unreadable):
+            df.at[i, "checked_at"] = f"{value}; {LEFT_NOTE_MARK} {stamp}" if value else f"{LEFT_NOTE_MARK} {stamp}"
 
 
 def sync_ledger(ledger: pd.DataFrame | None, tickets: list[Ticket], now: datetime | None,
@@ -754,10 +814,13 @@ def sync_ledger(ledger: pd.DataFrame | None, tickets: list[Ticket], now: datetim
     ticket twice. It is kept in ledger.csv and comes back as pending if the line returns.
     A checked (settled) row whose line was edited, so that a new line for the same game and
     draw date differs from it in only one of numbers, bet type and cost, is marked "invalid"
-    with ``REPLACED_PREFIX`` and its old result: the corrected line is checked instead and
-    the ticket is counted once. A checked row whose line was only deleted stays settled.
-    A retired row comes back (pending, checked again) if its line returns, and then retires
-    the edited row in the same way.
+    with ``REPLACED_PREFIX``, the corrected line and its old result: the corrected line is
+    checked instead and the ticket is counted once (``replaced_rows`` pairs them again). Only
+    a row whose line left the note in this sync counts as edited. A checked row whose line
+    was only deleted stays settled: its checked_at gets ``LEFT_NOTE_MARK``, so a similar
+    ticket for the same draw added in a later sync is a new ticket, not an edit. A retired
+    row comes back (pending, checked again) if its line returns, and then retires the edited
+    row in the same way.
     Nothing is retired when the note gave no ticket lines, unless ``note_read`` says the
     note was read and still has its ticket table (the user deleted every row); an empty or
     unreadable note must not wipe the pending tickets.
@@ -819,15 +882,49 @@ def sync_ledger(ledger: pd.DataFrame | None, tickets: list[Ticket], now: datetim
         fresh = {r["ticket_id"] for r in new_rows} | restored
         incoming = [_canonical(t) for t, tid in zip(tickets, ids) if tid in fresh]
         replaced = _edited_rows(df, incoming, current)
-        for i in replaced:
+        for pos, i in replaced:
             won = _dollars(float(df.at[i, "winnings"] or 0.0))
             was = str(df.at[i, "result"] or "") or "No prize"
+            now_text = _key_text(incoming[pos])
+            log.info("%s %s %s for %s was treated as corrected to %s (it had won %s)", df.at[i, "game"],
+                     df.at[i, "numbers"], df.at[i, "bet_type"], df.at[i, "draw_date"], now_text, won)
             df.at[i, "status"] = "invalid"
-            df.at[i, "result"] = f"{REPLACED_PREFIX} (was: {was}, won {won})"
+            df.at[i, "result"] = (f"{REPLACED_PREFIX}: {now_text} (was: {was}, won {won}). If both are "
+                                  "real tickets, put this row back in Tickets.md")
             df.at[i, "checked_at"] = stamp
         if replaced:
             log.info("replaced %d checked tickets by their edited lines in the note", len(replaced))
+        _mark_left_note(df, current, stamp, [t for t in tickets if t.error])
     return df
+
+
+def replaced_rows(ledger: pd.DataFrame | None, rows: list[dict]) -> dict[str, dict]:
+    """The checked row each of ``rows`` replaced as an edited line, keyed by its ticket_id.
+
+    ``rows`` are ledger rows as plain dicts (as ``settle_ledger`` and ``settled_rows`` give
+    them). ``sync_ledger`` stamps a replaced row with the time of the sync, and the corrected
+    line is checked in the same run with the same time, so the pairs are found again by
+    matching rows with the same stamp the way ``sync_ledger`` matched them. Rows that
+    replaced nothing are left out. The replaced rows come back as plain dicts of the ledger
+    columns (status "invalid", their old result in ``result``, the old ``winnings``).
+    """
+    df = _ledger_frame(ledger)
+    if not rows or len(df) == 0:
+        return {}
+    gone = df.index[(df["status"] == "invalid") & df["result"].astype(str).str.startswith(REPLACED_PREFIX)]
+    by_stamp: dict[str, dict[int, tuple]] = {}
+    for i in gone:
+        by_stamp.setdefault(_checked_stamp(df.at[i, "checked_at"]), {})[i] = _row_key(df.loc[i])
+    groups: dict[str, list[dict]] = {}
+    for r in rows:
+        stamp = _checked_stamp(r.get("checked_at"))
+        if stamp and stamp in by_stamp:
+            groups.setdefault(stamp, []).append(r)
+    out: dict[str, dict] = {}
+    for stamp, group in groups.items():
+        for pos, i in _match_edits([_row_key(r) for r in group], by_stamp[stamp]):
+            out[str(group[pos]["ticket_id"])] = {col: _py(df.at[i, col]) for col in LEDGER_COLUMNS}
+    return out
 
 
 @dataclass

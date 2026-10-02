@@ -878,3 +878,116 @@ def test_completed_draw_gets_its_note_rewritten(tmp_path):
     rows.clear()
     runner._rewrite_repaired_notes(vault, data, lambda event, text: rows.append((event, text)))
     assert rows == []
+
+
+def test_fetch_command_rewrites_the_note_of_a_draw_it_completes(seeded, toto, fourd):
+    from huatbot import notes
+    vault = seeded
+    df = load_toto(vault.toto_csv)
+    i = df.index[df["draw_number"] == TOTO_LAST_DRAW][0]
+    for g in range(1, 8):  # stored while the winning shares table was not published yet
+        df.loc[i, f"g{g}_share"] = float("nan")
+        df.loc[i, f"g{g}_winners"] = 0
+    save_toto(df, vault.toto_csv)
+    rel, fm, body = notes.toto_draw_note(df.loc[i])
+    vault.write_note(rel, body, fm)
+    before = vault.read_text(rel)
+
+    result = runner.fetch_data(vault=vault, fetcher=fake_site(toto, fourd), now=NOW + timedelta(minutes=5))
+    assert result.ok
+    stored = load_toto(vault.toto_csv)
+    assert int(stored.loc[stored["draw_number"] == TOTO_LAST_DRAW, "g7_winners"].iloc[0]) > 0
+    complete = notes.toto_draw_note(stored[stored["draw_number"] == TOTO_LAST_DRAW].iloc[0])
+    assert vault.read_text(rel) != before
+    assert vault.read_note(rel)[1].strip() == complete[2].strip()
+    assert any(e == "NOTE" and "2026-10-01 TOTO 4123" in d and "complete result" in d for e, d in log_rows(vault))
+
+
+# commentary
+
+
+def test_commentary_dropped_for_restating_the_odds_is_not_logged_as_added(seeded, toto, fourd, monkeypatch,
+                                                                           no_send):
+    from huatbot import commentary
+    monkeypatch.setenv("COMMENTARY", "claude")
+    monkeypatch.setattr(commentary, "build_commentary",
+                        lambda figures: "No strategy here beats the odds, so keep to your $10 TOTO budget.")
+    result = runner.run(dry_run=True, vault=seeded, fetcher=fake_site(toto, fourd), now=NOW, out=lambda s: None)
+    assert result.ok
+    rows = log_rows(seeded)
+    assert not any("Added a short commentary" in d for _, d in rows)
+    assert any(e == "ERROR" and "only restated the odds" in d for e, d in rows)
+    assert "beats the odds" not in result.messages[2]
+
+
+def test_commentary_logged_as_added_is_the_text_that_is_shown(seeded, toto, fourd, monkeypatch, no_send):
+    from huatbot import commentary
+    monkeypatch.setenv("COMMENTARY", "claude")
+    monkeypatch.setattr(commentary, "build_commentary",
+                        lambda figures: "Every draw is independent. The 4D plan stays within budget.")
+    result = runner.run(dry_run=True, vault=seeded, fetcher=fake_site(toto, fourd), now=NOW, out=lambda s: None)
+    rows = log_rows(seeded)
+    assert any(e == "NOTE" and "Added a short commentary" in d for e, d in rows)
+    assert not any(e == "ERROR" and "Commentary" in d for e, d in rows)
+    assert "The 4D plan stays within budget." in result.messages[2]
+    from pathlib import Path
+    assert "*Commentary:* The 4D plan stays within budget." in Path(result.report_path).read_text(encoding="utf-8")
+
+
+# a draw held earlier today
+
+
+def test_held_draw_gets_no_commentary_figures_or_log_rows_about_its_plan():
+    from tests.ctxgen import make_context, variant
+    ctx = make_context()
+    late = variant(ctx, now=datetime(2026, 10, 5, 21, 0, tzinfo=SG))  # TOTO 4124 held at 6.30pm
+    figures = runner._commentary_figures(late)
+    assert not {"next_toto", "buy_signal", "toto_suggestions"} & set(figures)
+    assert "4d_suggestions" in figures
+    rows: list[tuple[str, str]] = []
+    runner._log_suggestions(late, lambda e, m: rows.append((e, m)))
+    assert [e for e, _ in rows] == ["SUGGEST"] and rows[0][1].startswith("4D")
+
+    before = variant(ctx, now=datetime(2026, 10, 5, 17, 0, tzinfo=SG))  # still open for sales
+    assert {"next_toto", "buy_signal", "toto_suggestions"} <= set(runner._commentary_figures(before))
+    rows.clear()
+    runner._log_suggestions(before, lambda e, m: rows.append((e, m)))
+    assert [e for e, _ in rows] == ["SUGGEST", "SUGGEST", "SIGNAL"]
+
+
+# activity log rows that should not repeat
+
+
+def test_next_draws_row_is_logged_once_when_the_run_follows_the_refresh(seeded, toto, fourd, no_send):
+    vault = seeded
+    site = fake_site(toto, fourd)
+
+    def next_rows():
+        return [d for e, d in log_rows(vault) if e == "FETCH" and d.startswith("Next draws:")]
+
+    start = len(next_rows())
+    cycle = NOW + timedelta(hours=1)
+    runner.refresh_next_draws(vault, site, now=cycle)  # the scheduler, at the start of the cycle
+    runner.run(dry_run=True, vault=vault, fetcher=site, now=cycle + timedelta(minutes=1), out=lambda s: None)
+    assert len(next_rows()) == start + 1
+    # A retry 10 minutes later reads the pages again and says so.
+    runner.run(dry_run=True, vault=vault, fetcher=site, now=cycle + timedelta(minutes=11), out=lambda s: None)
+    assert len(next_rows()) == start + 2
+
+
+def test_retry_after_a_failed_post_keeps_one_report_note(seeded, toto, fourd, tg):
+    vault = seeded
+    tg.fail = True
+    first = runner.run(vault=vault, fetcher=fake_site(toto, fourd), now=NOW + timedelta(minutes=30),
+                       out=lambda s: None)
+    assert not first.ok and first.report_path
+    reports = sorted(p.name for p in vault.path("Reports").glob("*.md"))
+    tg.fail = False
+    again = runner.run(vault=vault, fetcher=fake_site(toto, fourd), now=NOW + timedelta(minutes=40),
+                       out=lambda s: None)
+    assert again.ok and again.posted
+    assert sorted(p.name for p in vault.path("Reports").glob("*.md")) == reports
+    assert again.report_path == first.report_path
+    report_name = again.report_path.rsplit("/", 1)[-1].removesuffix(".md")
+    assert f"Newest report: [[{report_name}]]" in vault.read_text("Dashboard.md")
+    assert any(e == "RUN" and f"report [[{report_name}]]" in d for e, d in log_rows(vault))

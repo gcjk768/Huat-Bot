@@ -583,3 +583,18 @@ def test_draw_list_after_a_long_break_is_accepted(toto_df):
     site = H.fake_site(toto_df)
     df, res = F.update_toto(site, toto_df.iloc[:-50], start_draw=int(toto_df["draw_number"].min()), now=NOW)
     assert len(res.new_draws) == 50 and res.verified
+
+
+def test_latest_on_site_strict_raises_when_the_site_cannot_be_reached():
+    from huatbot.http import FetchError as FE
+
+    class Down:
+        def get(self, url):
+            raise FE("site down")
+
+    assert F.latest_on_site(Down(), "toto") == (None, None)
+    with pytest.raises(FE):
+        F.latest_on_site(Down(), "toto", strict=True)
+    with pytest.raises(FE):
+        F.latest_complete_date(Down(), "4d", strict=True)
+    assert F.latest_complete_date(Down(), "4d") is None
