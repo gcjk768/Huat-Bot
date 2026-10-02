@@ -34,7 +34,7 @@ from . import prizes
 from .analysis_fourd import bet_type_value
 from .analysis_toto import format_p
 from .backtest import BETTER_ABOVE, RANDOM_NAME, WORSE_BELOW
-from .models import BacktestResult, Context, Plan, PlanLine, PrizeRules
+from .models import BacktestResult, Context, Plan, PrizeRules
 from .store import fourd_numbers, no_winner_streak, toto_numbers
 from .textfmt import (
     contains_dash,
@@ -79,7 +79,11 @@ EV_PARTS = (
 )
 BET_TYPES = ("Big", "Small", "iBet Big", "iBet Small")
 
-# Telegram: how many detail levels the message builders know (0 = everything).
+# Telegram: how many detail levels the message builders know (0 = everything). Each step
+# drops more: 1 the strategy reasons and the losing ticket lines; 2 the sales estimate, the
+# picks left out of the plan, plan notes and winning tickets beyond the first 10; 3 every
+# ticket line, the buy signal reason and the System 7 option; 4 the return breakdown, the
+# backtest line and the commentary.
 _TG_LEVELS = 5
 _TG_MORE = "<i>More detail is in the report note in the vault.</i>"
 _TG_WINNERS_CAP = 10  # winning tickets listed one by one at the tighter detail levels
@@ -538,8 +542,9 @@ def _md_section1(ctx: Context) -> str:
     parts.append(md_table(["Prize", "Big", "Small"], _prize_table_rows(ctx.rules), align="lrr"))
     values = _bet_values(ctx)
     if values.get("Big") is not None:
+        best = clean_text(values.get("best") or "Big")
         parts.append(f"Average return per $1: Big {per_dollar(values.get('Big'))}, Small "
-                     f"{per_dollar(values.get('Small'))}. {clean_text(values.get('best') or 'Big')} gives the most back.")
+                     f"{per_dollar(values.get('Small'))}. {best} gives the most back.")
     return "\n\n".join(parts)
 
 
@@ -620,7 +625,7 @@ def _md_section3(ctx: Context) -> str:
             else:
                 rows = [[clean_text(p.name), p.number, clean_text(p.bet_type), clean_text(p.reason)] for p in extra]
                 head = ["Pick", "Number", "Bet type", "Reason"]
-            parts.append("Also suggested, not in the plan because of the budget:")
+            parts.append("Also suggested, not in the plan:")
             parts.append(md_table(head, rows))
     parts.append(f"**Total for both games: {dollars(total)} of the {dollars(budget)} budget.**")
     return "\n\n".join(parts)
@@ -636,22 +641,21 @@ def _md_section4(ctx: Context) -> str:
     ])
 
 
+def _chi_row(label: str, result: dict) -> list[str]:
+    """One chi square table row: test, statistic, degrees of freedom, p value (never scientific)."""
+    p = as_float(result.get("p_value"))
+    return [label, fmt_num(as_float(result.get("stat")), 1), fmt_num(as_int(result.get("dof"))),
+            format_p(p if p is not None else float("nan"))]
+
+
 def _chi_rows(ctx: Context) -> list[list[str]]:
     rows = []
-    chi = ctx.toto_chi or {}
-    if chi:
-        rows.append(["TOTO numbers", fmt_num(as_float(chi.get("stat")), 1), fmt_num(as_int(chi.get("dof"))),
-                     format_p(as_float(chi.get("p_value")) if as_float(chi.get("p_value")) is not None else float("nan"))])
-    chi4 = ctx.fourd_chi or {}
-    if chi4:
-        overall = chi4.get("overall") or {}
-        p = as_float(overall.get("p_value"))
-        rows.append(["4D digits, all positions", fmt_num(as_float(overall.get("stat")), 1),
-                     fmt_num(as_int(overall.get("dof"))), format_p(p if p is not None else float("nan"))])
-        for pos, res in (chi4.get("per_position") or {}).items():
-            p = as_float(res.get("p_value"))
-            rows.append([f"4D digits, {pos} position", fmt_num(as_float(res.get("stat")), 1),
-                         fmt_num(as_int(res.get("dof"))), format_p(p if p is not None else float("nan"))])
+    if ctx.toto_chi:
+        rows.append(_chi_row("TOTO numbers", ctx.toto_chi))
+    if ctx.fourd_chi:
+        rows.append(_chi_row("4D digits, all positions", ctx.fourd_chi.get("overall") or {}))
+        for pos, res in (ctx.fourd_chi.get("per_position") or {}).items():
+            rows.append(_chi_row(f"4D digits, {pos} position", res or {}))
     return rows
 
 
@@ -716,8 +720,8 @@ def _toto_stats_md(ctx: Context) -> list[str]:
         rows = [[k, pct(as_float(odd.get(k, odd.get(str(k)))), 1), pct(as_float(low.get(k, low.get(str(k)))), 1)]
                 for k in range(C.TOTO_PICK + 1)]
         parts.append("### Usual shape of a winning TOTO set")
-        parts.append(md_table(["How many", "Share with that many odd", f"Share with that many low (1 to {C.TOTO_LOW_MAX})"],
-                              rows, align="rrr"))
+        head = ["How many", "Share with that many odd", f"Share with that many low (1 to {C.TOTO_LOW_MAX})"]
+        parts.append(md_table(head, rows, align="rrr"))
         parts.append(
             f"Most common: {shape.get('typical_odd', 'n/a')} odd and {shape.get('typical_low', 'n/a')} low numbers. "
             f"The middle 50% of winning sets add up to {fmt_num(as_float(shape.get('sum_q25')))} to "
@@ -754,7 +758,8 @@ def _fourd_stats_md(ctx: Context) -> list[str]:
                 rows.append([bet, per_dollar(as_float(v))])
         parts.append("### 4D bet type value")
         parts.append(md_table(["Bet type", "Average return per $1"], rows, align="lr"))
-        parts.append(f"Best bet type: **{clean_text(values.get('best') or 'n/a')}**. {clean_text(values.get('explanation'))}")
+        best = clean_text(values.get("best") or "n/a")
+        parts.append(f"Best bet type: **{best}**. {clean_text(values.get('explanation'))}")
         if values.get("ibet_note"):
             parts.append(clean_text(values["ibet_note"]))
     return parts

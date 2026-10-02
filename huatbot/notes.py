@@ -22,24 +22,20 @@ from typing import Any
 
 import pandas as pd
 
-from .models import Context, LEDGER_COLUMNS
+from .models import LEDGER_COLUMNS, Context
 from .report import (
     GAME_NAMES,
     NextDraw,
-    clean_text,
-    as_date,
-    dollars,
-    field,
-    as_int,
-    as_float,
-    sentence,
-    to_sg,
-    shape_text,
-    toto_signal,
     activity_note_name,
+    as_date,
+    as_float,
+    as_int,
     backtest_summary,
+    clean_text,
+    dollars,
     draw_note_name,
     draw_type_name,
+    field,
     fourd_result_md,
     latest_row,
     link,
@@ -48,10 +44,22 @@ from .report import (
     plan_md,
     report_note_name,
     report_warnings,
+    sentence,
+    shape_text,
+    to_sg,
     toto_result_md,
+    toto_signal,
 )
 from .store import fourd_numbers, toto_numbers
-from .textfmt import fmt_date, fmt_datetime, md_table, money, per_dollar, plural, toto_nums
+from .textfmt import (
+    fmt_date,
+    fmt_datetime,
+    md_table,
+    money,
+    per_dollar,
+    plural,
+    toto_nums,
+)
 
 log = logging.getLogger(__name__)
 
@@ -180,7 +188,8 @@ def _next_rows(ctx: Context) -> list[list[str]]:
         nd = next_draw(ctx, game)
         path = suggestion_note_path(nd)
         if game == "toto":
-            prize = f"{money(sig['jackpot'])} estimated jackpot" if sig["jackpot"] is not None else "jackpot not announced yet"
+            jackpot = sig["jackpot"]
+            prize = f"{money(jackpot)} estimated jackpot" if jackpot is not None else "jackpot not announced yet"
             kind = draw_type_name(sig["draw_type"])
         else:
             first = as_float(ctx.rules.fourd_prizes.get("big", {}).get("first"))
