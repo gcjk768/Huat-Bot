@@ -1,0 +1,16 @@
+[project]
+name = "huatbot"
+version = "0.1.0"
+description = "Singapore Pools 4D and TOTO analyst bot: scrapes results, analyses history, suggests numbers within a budget, posts to Telegram and keeps everything in an Obsidian vault."
+requires-python = ">=3.11"
+readme = "README.md"
+
+[project.scripts]
+huatbot = "huatbot.cli:main"
+
+[tool.setuptools]
+packages = ["huatbot"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
