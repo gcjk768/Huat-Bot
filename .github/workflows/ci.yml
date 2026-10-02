@@ -1,0 +1,56 @@
+# Tests on every push and pull request. Everything runs offline: the test suite uses saved
+# HTML fixtures and synthetic draws, never the Singapore Pools site or Telegram.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      # Runners use UTC, which also checks that nothing depends on the host time zone.
+      - name: Run tests
+        run: python -m pytest -q
+
+  docker:
+    name: Docker image builds
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Build the image
+        run: docker build -t huat-bot .
+
+      - name: Smoke test the CLI inside the image
+        run: docker run --rm huat-bot python -m huatbot --help
