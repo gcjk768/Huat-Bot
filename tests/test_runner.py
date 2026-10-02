@@ -220,7 +220,7 @@ def test_first_run_dry_run_end_to_end(first_run, toto):
     m1, m2 = result.messages
     assert m1.startswith("🎉 <b>WINNER</b> · your tickets won $10\n1 winning ticket, details below.")
     assert f"<b>TOTO RESULT</b> · Draw {TOTO_LAST_DRAW}, Thu 1 Oct 2026" in m1
-    assert "<b>MY TICKETS</b>" in m1 and "Group 7 x1, won <b>$10</b>" in m1
+    assert "<b>MY TICKETS</b>" in m1 and "Group 7 x1 · won <b>$10</b>" in m1
     assert "2 lines in Tickets.md could not be read, see Ledger.md." in m1
     assert "Next TOTO draw" not in m1
 
@@ -229,7 +229,7 @@ def test_first_run_dry_run_end_to_end(first_run, toto):
     assert "<b>Cascade draw</b>" in m2
     assert "rollovers 3 of 3, this is the cascade draw" in m2
     assert "Somebody wins Group 1: <b>" in m2
-    assert "Buy signal <b>HIGH</b>" in m2
+    assert "<b>Buy signal HIGH</b>" in m2
     assert "<b>$1.01</b> back per $1 on average" in m2
     assert "Cascaded jackpot" in m2  # the return breakdown
     assert "Sales estimate: about " in m2
@@ -397,15 +397,14 @@ def test_new_draw_is_fetched_alone_and_posted(seeded, toto, tg):
     assert "<b>Jackpot $1,000,000</b>" in m2
     assert "Normal draw · " in m2
     assert "rollovers 0 of 3, then it cascades" in m2
-    assert "Buy signal <b>LOW</b>" in m2
+    assert "<b>Buy signal LOW</b>" in m2
     assert ("If nobody wins Group 1 first, the jackpot snowballs to about $3,714,000 at the cascade draw on "
             "Mon 19 Oct 2026") in m2
-    table = re.search(r"<b>NEXT BIG PRIZE</b>.*?<pre>(.*?)</pre>", m2, re.S).group(1).splitlines()
-    assert table[0].split() == ["Draw", "Jackpot", "Unwon", "Won"]
-    assert [" ".join(line.split()[:3]) for line in table[1:]] == ["Thu 8 Oct", "Mon 12 Oct", "Thu 15 Oct",
-                                                                    "Mon 19 Oct"]
-    assert table[1].split()[3] == "$1.00m" and table[4].split()[3] == "$3.71m"
-    assert table[1].split()[4] == "100%"
+    steps = re.findall(r"^(?:📅|🌊) <b>(.*?)</b> · (\S+) · unwon (\d+%)", m2, re.M)
+    assert [s[0] for s in steps] == ["Thu 8 Oct", "Mon 12 Oct", "Thu 15 Oct", "Mon 19 Oct"]
+    assert steps[0][1] == "$1.00m" and steps[3][1] == "$3.71m"
+    assert steps[0][2] == "100%"
+    assert "🌊 <b>Mon 19 Oct</b>" in m2  # the cascade draw is marked
 
     # the SIGNAL row changed with the new draw and names the next big prize
     signal = [d for e, d in rows if e == "SIGNAL"]
@@ -926,7 +925,7 @@ def test_an_old_ledger_with_4d_rows_is_kept(seeded, toto, no_send):
     totals = tickets.ledger_totals(after.reset_index())
     assert totals["won"] == 4010.0 and totals["spent"] == 12.0 and totals["invalid"] == 1
     # the old 4D win is history in the totals; the messages carry no 4D figures of their own
-    assert "All tickets so far: spent $12, won $4,010, net <b>$3,998</b>." in result.messages[0]
+    assert "<b>All tickets so far</b> · spent $12 · won $4,010\n💰 Net <b>$3,998</b>" in result.messages[0]
     assert "4D" not in "\n".join(result.messages)
     ledger_note = vault.read_text("Ledger.md")
     assert "| Wed 30 Sep 2026 | 5432 | 1234                | Big      |   $2 | Checked              | 1st prize" \
@@ -1216,7 +1215,7 @@ def test_tickets_checked_before_a_failed_post_are_posted_on_the_retry(seeded, to
     assert len(tg.sent) == sent_before + 2
     message1 = tg.sent[sent_before]["text"]
     assert "No tickets were checked in this run" not in message1
-    assert message1.count("Mon 5 Oct 2026, 3 11 19 27 38 45") == 2  # the Ordinary and the System 7 ticket
+    assert message1.count("<b>Mon 5 Oct 2026</b> · 3 11 19 27 38 45") == 2  # the Ordinary and the System 7 ticket
     assert "unposted_settled" not in vault.load_state()
     assert "Checked in this run: 2 tickets" in vault.read_text("Home.md")
 

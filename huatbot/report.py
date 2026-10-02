@@ -34,6 +34,7 @@ from . import constants as C
 from . import tickets as ticket_ledger
 from .models import Context, JackpotHistory, JackpotOutlook, PrizeRules
 from .outlook import chance_won_by_cascade
+from .parse import sppl
 from .store import no_winner_streak, toto_numbers
 from .textfmt import (
     contains_dash,
@@ -47,7 +48,6 @@ from .textfmt import (
     pct,
     per_dollar,
     plural,
-    pre_block,
     remove_dashes,
     toto_nums,
 )
@@ -88,6 +88,7 @@ SECTION_TITLES = {
     "result": "🎱", "winner": "🎉", "tickets": "🎫", "next": "🔮", "big": "💎", "more": "📜",
 }
 SIGNAL_MARKERS = {"HIGH": "🟢", "MEDIUM": "🟡", "LOW": "🔴"}
+GROUP_EMOJI = {2: "🥈", 3: "🥉"}  # Group 1 is 🏆, the rest 🎟
 
 
 def title(section: str, name: str, subtitle: str = "") -> str:
@@ -871,19 +872,32 @@ def _fit(build: Callable[[int], list[str]]) -> str:
     return _scrub(_tg_join(blocks + [_TG_MORE]))
 
 
+def _link(label: str, url: str) -> str:
+    return f'<a href="{html_escape(url)}">{_h(label)}</a>'
+
+
 def _tg_result(ctx: Context) -> str:
+    """Car tracker card style: the numbers block, then one line per prize group, then the source."""
     row = latest_row(ctx.toto)
     if row is None:
         return "No TOTO result is stored yet."
-    lines = [
-        f"🔢 <b>Winning numbers</b> · <code>{toto_nums(toto_numbers(row))}</code>",
-        f"➕ Additional number · <code>{as_int(field(row, 'additional'))}</code>",
-        "🏆 Group 1 · <b>{}</b>, {}".format(*(_h(x) for x in _group1_parts(row))),
-        pre_block(["Group", "Share", "Winners"], _group_rows(row), "lrr"),
-    ]
+    blocks = []
     if not ctx.new_draws:
-        lines.insert(0, "<i>No new draw in this run, this is the newest stored result.</i>")
-    return "\n".join(lines)
+        blocks.append("<i>No new draw in this run, this is the newest stored result.</i>")
+    blocks.append(f"🔢 <b>Winning numbers</b> · <code>{toto_nums(toto_numbers(row))}</code>\n"
+                  f"➕ Additional number · <code>{as_int(field(row, 'additional'))}</code>")
+    amount, detail = _group1_parts(row)
+    groups = [f"🏆 <b>Group 1</b> · <b>{_h(amount)}</b> · {_h(detail)}"]
+    for g in range(2, 8):
+        share = as_float(field(row, f"g{g}_share"))
+        winners = as_int(field(row, f"g{g}_winners"))
+        prize = f"{money(share)} · {plural(winners, 'winner')}" if share is not None and winners else "no winner"
+        groups.append(f"{GROUP_EMOJI.get(g, '🎟')} <b>Group {g}</b> · {_h(prize)}")
+    number = as_int(field(row, "draw_number"))
+    if number:
+        groups.append("🌐 " + _link("Singapore Pools result", C.TOTO_RESULT_URL.format(sppl=sppl(number))))
+    blocks.append("\n".join(groups))
+    return "\n\n".join(blocks)
 
 
 def _result_title(ctx: Context) -> str:
@@ -896,13 +910,15 @@ def _result_title(ctx: Context) -> str:
                  f"Draw {as_int(field(row, 'draw_number'))}, {fmt_date(as_date(field(row, 'draw_date')))}{kind}")
 
 
-def _ticket_line(r: dict, was: dict | None = None) -> str:
+def _ticket_block(r: dict, was: dict | None = None) -> str:
+    """`🟢 <b>Thu 1 Oct 2026</b> · numbers · bet` then the result line, one block per ticket."""
     won = as_float(r.get("winnings")) or 0.0
-    head = f"{fmt_date(r.get('draw_date'))}, {_h(r.get('numbers'))}, {_h(r.get('bet_type'))} {dollars(r.get('cost'))}"
-    fix = f", {_h(_correction_note(was))}" if was is not None else ""
+    head = (f"{_ticket_mark(r)} <b>{fmt_date(r.get('draw_date'))}</b> · {_h(r.get('numbers'))} · "
+            f"{_h(r.get('bet_type'))} {dollars(r.get('cost'))}")
+    fix = f" · {_h(_correction_note(was))}" if was is not None else ""
     if won > 0:
-        return f"{head}: {_h(r.get('result'))}{fix}, {'now won' if fix else 'won'} <b>{dollars(won)}</b>"
-    return f"{head}: {_h(r.get('result') or 'No prize')}{fix}"
+        return f"{head}\n💰 {_h(r.get('result'))}{fix} · {'now won' if fix else 'won'} <b>{dollars(won)}</b>"
+    return f"{head}\n🎯 {_h(r.get('result') or 'No prize')}{fix}"
 
 
 def _ticket_mark(r: dict) -> str:
@@ -919,7 +935,7 @@ def _no_draw_cost(ctx: Context) -> float:
 
 
 def _tg_tickets(ctx: Context, level: int) -> str:
-    lines = [title("tickets", "My tickets")]
+    blocks = [title("tickets", "My tickets")]
     settled = list(ctx.settled_this_run or [])
     fixes = corrections(ctx)
     winners = sorted((r for r in settled if (as_float(r.get("winnings")) or 0.0) > 0),
@@ -927,49 +943,55 @@ def _tg_tickets(ctx: Context, level: int) -> str:
     losers = [r for r in settled if (as_float(r.get("winnings")) or 0.0) <= 0]
     total_won, n_won = _run_winnings(settled, fixes)
     if not settled:
-        lines.append("No tickets were checked in this run.")
+        blocks.append("⚪ No tickets were checked in this run.")
     elif level == 0:
-        lines += [f"{_ticket_mark(r)} {_ticket_line(r, _was(fixes, r))}" for r in winners + losers]
+        blocks += [_ticket_block(r, _was(fixes, r)) for r in winners + losers]
     elif level <= 2:
         # A corrected ticket is always listed: it changes a result already announced.
         shown = [r for k, r in enumerate(winners) if level == 1 or k < _TG_WINNERS_CAP or _was(fixes, r)]
         fixed_losers = [r for r in losers if _was(fixes, r)]
-        lines += [f"{_ticket_mark(r)} {_ticket_line(r, _was(fixes, r))}" for r in shown + fixed_losers]
+        blocks += [_ticket_block(r, _was(fixes, r)) for r in shown + fixed_losers]
+        rest = []
         if len(shown) < len(winners):
-            lines.append(f"🟢 and {plural(len(winners) - len(shown), 'more winning ticket')}")
+            rest.append(f"🟢 and {plural(len(winners) - len(shown), 'more winning ticket')}")
         if len(losers) > len(fixed_losers):
-            lines.append(f"{plural(len(losers) - len(fixed_losers), 'other ticket')} checked won nothing.")
+            rest.append(f"⚪ {plural(len(losers) - len(fixed_losers), 'other ticket')} checked won nothing.")
+        blocks.append("\n".join(rest))
     else:
-        lines.append(f"{plural(len(settled), 'ticket')} checked, {fmt_num(n_won)} won, "
-                     f"{dollars(total_won)} in total.")
+        lines = [f"🎫 {plural(len(settled), 'ticket')} checked · {fmt_num(n_won)} won · "
+                 f"{dollars(total_won)} in total"]
         if fixes:
-            lines.append("1 of them is a corrected row of a ticket already checked, see Ledger.md."
+            lines.append("✏️ 1 of them is a corrected row of a ticket already checked, see Ledger.md."
                          if len(fixes) == 1 else
-                         f"{fmt_num(len(fixes))} of them are corrected rows of tickets already checked, see "
+                         f"✏️ {fmt_num(len(fixes))} of them are corrected rows of tickets already checked, see "
                          "Ledger.md.")
+        blocks.append("\n".join(lines))
     if fixes:
-        lines.append(f"<i>{_h(CORRECTION_HINT)}</i>")
+        blocks.append(f"<i>{_h(CORRECTION_HINT)}</i>")
 
     totals = ctx.ledger_totals or {}
+    lines = []
     if as_int(totals.get("tickets")):
-        lines.append(f"📒 All tickets so far: spent {dollars(totals.get('spent'))}, won "
-                     f"{dollars(totals.get('won'))}, net <b>{dollars(totals.get('net'))}</b>.")
+        lines += [f"📒 <b>All tickets so far</b> · spent {dollars(totals.get('spent'))} · won "
+                  f"{dollars(totals.get('won'))}",
+                  f"💰 Net <b>{dollars(totals.get('net'))}</b>"]
         pending = as_int(totals.get("pending"))
         if pending:
-            lines.append(f"{plural(pending, 'ticket')} ({dollars(totals.get('pending_cost'))}) "
+            lines.append(f"⏳ {plural(pending, 'ticket')} ({dollars(totals.get('pending_cost'))}) "
                          f"{'waits' if pending == 1 else 'wait'} for the draw.")
         no_draw = as_int(totals.get("no_draw"))
         if no_draw:
-            lines.append(f"{plural(no_draw, 'ticket')} ({dollars(_no_draw_cost(ctx))}) "
+            lines.append(f"📅 {plural(no_draw, 'ticket')} ({dollars(_no_draw_cost(ctx))}) "
                          f"{'has' if no_draw == 1 else 'have'} no draw on {'its' if no_draw == 1 else 'their'} "
                          f"date and still {'counts' if no_draw == 1 else 'count'} as spent. Check the date in "
                          "Tickets.md.")
     elif not settled:
-        lines.append("Add the tickets you buy to Tickets.md in the vault and the bot will check them.")
+        lines.append("📝 Add the tickets you buy to Tickets.md in the vault and the bot will check them.")
     if ctx.bad_ticket_lines:
-        lines.append(f"{plural(len(ctx.bad_ticket_lines), 'line')} in Tickets.md could not be read, "
+        lines.append(f"⚠️ {plural(len(ctx.bad_ticket_lines), 'line')} in Tickets.md could not be read, "
                      "see Ledger.md.")
-    return "\n".join(lines)
+    blocks.append("\n".join(lines))
+    return _tg_join(blocks)
 
 
 def _tg_message1(ctx: Context, level: int) -> list[str]:
@@ -1000,70 +1022,85 @@ def _jackpot_change(ctx: Context, jackpot: float | None) -> str:
     return f" 🔴 <i>RESET ▼{_h(money(last - jackpot))}</i>"
 
 
-def _tg_next_draw(ctx: Context, level: int) -> str:
+def _tg_next_draw(ctx: Context, level: int) -> list[str]:
+    """The header, the jackpot block and the buy signal block (whole blocks, blank lines between)."""
     sig = toto_signal(ctx)
     nd = next_draw(ctx)
     out = ctx.outlook
     first = out.steps[0] if out is not None and out.steps else None
     sub = nd.when_text + (f", draw {nd.number}" if nd.number else "")
-    lines = [title("next", "Next TOTO draw", sub), ""]
     worked_out = f" <i>({JACKPOT_WORKED_OUT})</i>" if sig["jackpot_worked_out"] else ""
     dtype = draw_type_name(sig["draw_type"])
     dtype_text = f"<b>{_h(dtype)} draw</b>" if sig["draw_type"] != "normal" else f"{_h(dtype)} draw"
     if sig["jackpot"] is not None:
-        lines.append(f"💰 <b>Jackpot {money(sig['jackpot'])}</b>{worked_out}{_jackpot_change(ctx, sig['jackpot'])}")
+        jackpot = [f"💰 <b>Jackpot {money(sig['jackpot'])}</b>{worked_out}{_jackpot_change(ctx, sig['jackpot'])}"]
     else:
-        lines.append("💰 Jackpot not available yet")
-    lines.append(f"🗓 {dtype_text} · rollovers {_h(rollover_text(sig))}")
+        jackpot = ["💰 Jackpot not available yet"]
+    jackpot.append(f"🗓 {dtype_text} · rollovers {_h(rollover_text(sig))}")
     if first is not None:
-        lines.append(f"🎯 Somebody wins Group 1: <b>{pct(first.chance_won, 0)}</b>")
+        jackpot.append(f"🎯 Somebody wins Group 1: <b>{pct(first.chance_won, 0)}</b>")
+    blocks = [title("next", "Next TOTO draw", sub), "\n".join(jackpot)]
     if nd.held:
-        lines.append("⏸ Its sales are closed, so there is no buy signal for it.")
-        return "\n".join(lines)
+        blocks.append("⏸ Its sales are closed, so there is no buy signal for it.")
+        return blocks
     label = sig["label"]
     marker = SIGNAL_MARKERS.get(str(label or "").upper(), "⚪")
-    signal = f"{marker} Buy signal <b>{_h(label or 'not available')}</b>"
+    signal = f"{marker} <b>Buy signal {_h(label or 'not available')}</b>"
     if sig["ev"] is not None:
         signal += f" · <b>{per_dollar(sig['ev'])}</b> back per $1 on average"
-    lines.append(signal)
+    blocks.append(signal)
+    return blocks
+
+
+def _tg_signal_notes(ctx: Context, level: int) -> list[str]:
+    """Background on the buy signal for the collapsed quote: its reason, the return per $1 by
+    prize group and how the sales were estimated."""
+    sig = toto_signal(ctx)
+    if next_draw(ctx).held:
+        return []
+    notes = []
     if sig["reason"] and level < 3:
-        lines.append(f"<i>{_h(sig['reason'])}</i>")
+        notes.append(f"🚦 {_h(sig['reason'])}")
     ev_rows = _ev_rows(sig["breakdown"]) if sig["ev"] is not None else []
     if ev_rows and level < 4:
-        lines.append(pre_block(["Part", "Per $1"],
-                               [[r[0].replace(" (fixed prizes)", ""), r[1]] for r in ev_rows], "lr"))
+        parts = [f"{r[0].replace(' (fixed prizes)', '')} {r[1]}" for r in ev_rows]
+        notes.append("🧮 Back per $1: " + _h(" · ".join(parts)))
     if sig["boards"] is not None and level < 1:
-        lines.append(f"🎟 Sales estimate: about {boards_text(sig['boards'])} boards ({_h(sig['boards_method'])}).")
-    return "\n".join(lines)
+        notes.append(f"🎟 Sales estimate: about {boards_text(sig['boards'])} boards ({_h(sig['boards_method'])}).")
+    return notes
 
 
 def _tg_big_prize(ctx: Context, level: int) -> str | None:
+    """`💎 NEXT BIG PRIZE` then one line per projected draw, the cascade draw marked 🌊."""
     out = ctx.outlook
     if out is None or not out.steps:
         return None
     big = out.biggest
     when = f" on {short_date(big.draw_date)}" if big is not None and big.draw_date and len(out.steps) > 1 else ""
-    lines = [title("big", "Next big prize", f"about {short_money(big.jackpot)}{when}" if big is not None else "")]
+    blocks = [title("big", "Next big prize", f"about {short_money(big.jackpot)}{when}" if big is not None else "")]
     text = big_prize_text(out)
     if text:
-        lines.append(_h(text))
+        blocks.append(f"<i>{_h(text)}</i>")
+    lines = []
     if len(out.steps) > 1 and level < 4:
-        rows = [[short_date(s.draw_date), short_money(s.jackpot), pct(s.chance_reached, 0), pct(s.chance_won, 0)]
-                for s in out.steps]
-        lines.append(pre_block(["Draw", "Jackpot", "Unwon", "Won"], rows, "lrrr"))
-        lines.append("<i>Unwon: chance nobody has won it by then. Won: chance somebody wins at that draw.</i>")
+        lines += [f"{'🌊' if s.cascade else '📅'} <b>{short_date(s.draw_date)}</b> · {short_money(s.jackpot)} · "
+                  f"unwon {pct(s.chance_reached, 0)} · won {pct(s.chance_won, 0)}" for s in out.steps]
     special = specials_text(out)
     if special:
         lines.append(f"🧧 {_h(special)}")
-    return "\n".join(lines)
+    blocks.append("\n".join(lines))
+    return _tg_join(blocks)
 
 
 def _tg_message2(ctx: Context, level: int) -> list[str]:
-    blocks = [_tg_next_draw(ctx, level)]
+    blocks = _tg_next_draw(ctx, level)
     big = _tg_big_prize(ctx, level)
     if big:
         blocks += [DIVIDER, big]
-    more = []
+    more = _tg_signal_notes(ctx, level)
+    out = ctx.outlook
+    if out is not None and len(out.steps) > 1 and level < 4:
+        more.append("📊 Unwon: chance nobody has won it by then. Won: chance somebody wins at that draw.")
     hist = history_line(ctx.history)
     if hist and level < 2:
         more.append(f"{SECTION_TITLES['more']} {_h(hist)}")
