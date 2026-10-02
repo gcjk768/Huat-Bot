@@ -1,0 +1,33 @@
+# Huat Bot on a NAS (UGREEN UGOS, Synology, any Docker host).
+#
+# 1. Copy .env.example to .env in this folder and fill it in.
+# 2. docker compose up -d --build
+#
+# The container runs as your NAS user (PUID:PGID), reads and writes only the Obsidian vault
+# mounted at /vault, and needs outbound HTTPS to www.singaporepools.com.sg,
+# online2.singaporepools.com and api.telegram.org.
+
+services:
+  huat-bot:
+    build:
+      context: .
+      args:
+        # true adds Node.js and the Claude Code CLI for COMMENTARY=claude (rebuild after changing)
+        INSTALL_CLAUDE: ${INSTALL_CLAUDE:-false}
+    image: huat-bot:latest
+    container_name: huat-bot
+    restart: unless-stopped
+    # tini as PID 1: forwards stop signals and reaps child processes (claude -p)
+    init: true
+    env_file: .env
+    environment:
+      TZ: Asia/Singapore
+      VAULT_PATH: /vault
+    user: "${PUID:-1000}:${PGID:-10}"
+    volumes:
+      - "${VAULT_HOST_PATH:?Set VAULT_HOST_PATH in .env to your Obsidian vault folder on the NAS}:/vault"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

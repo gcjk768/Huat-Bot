@@ -1,8 +1,10 @@
 .git
+.github
 .env
 vault
 demo-vault
 tests
-__pycache__
-*.pyc
+**/__pycache__
+**/*.pyc
 .pytest_cache
+.ruff_cache
