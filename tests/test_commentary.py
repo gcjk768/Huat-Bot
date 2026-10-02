@@ -226,17 +226,17 @@ def test_figures_agree_with_the_messages():
     msg1, msg2 = report.telegram_messages(ctx)
     assert list(figs) == SECTIONS
     nt, bs, out = figs["next_toto"], figs["buy_signal"], figs["jackpot_outlook"]
-    assert f"Next TOTO draw</b> (draw 4124): {nt['draw_time']}" in msg2
-    assert f"Estimated jackpot: <b>{nt['estimated_jackpot']}</b>" in msg2
-    assert f"Buy signal: <b>{bs['label']}</b>" in msg2
-    assert f"Return per $1: <b>{bs['return_per_dollar']}</b>" in msg2
+    assert f"NEXT TOTO DRAW</b> · {nt['draw_time']}, draw 4124" in msg2
+    assert f"<b>Jackpot {nt['estimated_jackpot']}</b>" in msg2
+    assert f"Buy signal <b>{bs['label']}</b>" in msg2
+    assert f"<b>{bs['return_per_dollar']}</b> back per $1" in msg2
     assert out["jackpot_rollovers_so_far"] == 1 and out["draws_until_cascade"] == 3
-    assert "Jackpot rollovers so far: 1 of 3, then it cascades" in msg2
-    assert f"Chance somebody wins Group 1 at this draw: <b>{out['chance_somebody_wins_next_draw']}</b>" in msg2
+    assert "rollovers 1 of 3, then it cascades" in msg2
+    assert f"Somebody wins Group 1: <b>{out['chance_somebody_wins_next_draw']}</b>" in msg2
     assert (f"snowballs to about {out['biggest_projected_jackpot']} at the cascade draw on "
             f"{out['biggest_projected_on']} ({out['chance_jackpot_gets_that_far']} chance") in msg2
     assert f"Group 1 was won in {figs['jackpot_history']['share_of_draws_with_a_group_1_winner']} of draws" in msg2
-    assert f"Winning numbers: <b>{figs['latest_toto']['numbers']}</b>" in msg1
+    assert f"<b>Winning numbers</b> · <code>{figs['latest_toto']['numbers']}</code>" in msg1
     assert figs["my_tickets"] == {"tickets": 4, "spent": "$10", "won": "$10", "net": "$0"}
     assert "spent $10, won $10, net <b>$0</b>" in msg1
 
@@ -406,7 +406,8 @@ def test_build_commentary_runs_claude(monkeypatch):
     assert out == "The buy signal is HIGH with a $3,500,000 jackpot."
     assert len(runner.calls) == 1
     args, kwargs = runner.calls[0]
-    assert args[0] == "claude" and args[1] == "-p" and len(args) == 3
+    assert args[0] == "claude" and args[1] == "-p"
+    assert args[3:] == ["--model", "haiku", "--no-session-persistence"]
     assert kwargs == {"capture_output": True, "text": True, "timeout": 33}
     prompt = args[2]
     assert prompt == build_prompt(FIGURES)

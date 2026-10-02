@@ -32,7 +32,7 @@ from tests.ctxgen import (
     variant,
 )
 
-ALLOWED_TAGS = {"b", "i", "pre", "code"}
+ALLOWED_TAGS = {"b", "i", "pre", "code", "blockquote"}
 SG = report.SG
 
 
@@ -118,7 +118,7 @@ class _TagChecker(HTMLParser):
     def handle_starttag(self, tag, attrs):
         if tag not in ALLOWED_TAGS:
             self.problems.append(f"tag <{tag}> not allowed")
-        if attrs:
+        if attrs and not (tag == "blockquote" and attrs == [("expandable", None)]):
             self.problems.append(f"attributes on <{tag}>")
         self.stack.append(tag)
 
@@ -139,7 +139,7 @@ def html_problems(text: str) -> list[str]:
     problems = list(checker.problems)
     if checker.stack:
         problems.append(f"unclosed tags {checker.stack}")
-    plain = re.sub(r"</?(?:b|i|pre|code)>", "", text)
+    plain = re.sub(r"</?(?:b|i|pre|code|blockquote)(?: expandable)?>", "", text)
     if "<" in plain or ">" in plain:
         problems.append("unescaped < or > in text")
     if re.search(r"&(?!amp;|lt;|gt;|quot;)", plain):
@@ -183,8 +183,8 @@ def test_telegram_messages_are_two_valid_html_messages(name, scenarios):
     for msg in messages:
         assert_valid_message(msg)
     # Message 1 is the result, message 2 the next draw.
-    assert "<b>Next TOTO draw</b>" not in messages[0]
-    assert messages[1].startswith("<b>Next TOTO draw</b>")
+    assert "<b>NEXT TOTO DRAW</b>" not in messages[0]
+    assert messages[1].startswith("🔮 <b>NEXT TOTO DRAW</b>")
 
 
 @pytest.mark.parametrize("name", SCENARIOS)
@@ -201,13 +201,13 @@ def test_message1_headline_is_obvious_when_a_ticket_won(ctx):
     won = sum(r["winnings"] for r in ctx.settled_this_run)
     assert won == 10.0
     head = report.telegram_messages(ctx)[0].split("\n\n", 1)[0]
-    assert head == "<b>WINNER! Your tickets won $10 in this run</b>\n1 winning ticket, details below."
+    assert head == "🎉 <b>WINNER</b> · your tickets won $10\n1 winning ticket, details below."
 
 
 def test_message1_headline_plain_when_nothing_won(ctx):
     msg = report.telegram_messages(_nothing_won(ctx))[0]
     assert "WINNER" not in msg
-    assert msg.startswith("<b>Huat Bot TOTO result</b>, Thu 1 Oct 2026\n\n")
+    assert msg.startswith("🎱 <b>TOTO RESULT</b> · Draw 4123, Thu 1 Oct 2026\n\n")
     assert "No prize" in msg
 
 
@@ -215,11 +215,11 @@ def test_message1_has_the_full_latest_result(ctx):
     msg = report.telegram_messages(ctx)[0]
     row = report.latest_row(ctx.toto)
     assert int(row["draw_number"]) == TOTO_LAST_DRAW
-    assert "<b>TOTO draw 4123</b>, Thu 1 Oct 2026\n" in msg
+    assert "<b>TOTO RESULT</b> · Draw 4123, Thu 1 Oct 2026\n" in msg
     assert "(Normal draw)" not in msg  # only a special kind of draw is named
-    assert f"Winning numbers: <b>{' '.join(str(n) for n in toto_numbers(row))}</b>" in msg
-    assert f"Additional number: <b>{int(row['additional'])}</b>" in msg
-    assert "Group 1 prize: <b>$1,000,000</b>, no winner" in msg
+    assert f"<b>Winning numbers</b> · <code>{' '.join(str(n) for n in toto_numbers(row))}</code>" in msg
+    assert f"Additional number · <code>{int(row['additional'])}</code>" in msg
+    assert "Group 1 · <b>$1,000,000</b>, no winner" in msg
     assert "<pre>Group       Share  Winners\n" in msg
     for g in range(1, 8):
         assert f"Group {g}" in msg
@@ -236,8 +236,8 @@ def test_message1_names_a_cascade_result_and_its_winners(ctx):
     toto.loc[i, "g1_share"] = 2_000_000.0
     toto.loc[i, "jackpot"] = 4_000_000.0
     msg = report.telegram_messages(variant(ctx, toto=toto))[0]
-    assert "<b>TOTO draw 4123</b>, Thu 1 Oct 2026 (Cascade draw)" in msg
-    assert "Group 1 prize: <b>$4,000,000</b>, 2 winning shares of $2,000,000 each" in msg
+    assert "<b>TOTO RESULT</b> · Draw 4123, Thu 1 Oct 2026, Cascade draw" in msg
+    assert "Group 1 · <b>$4,000,000</b>, 2 winning shares of $2,000,000 each" in msg
 
 
 def test_message1_without_new_draws_says_so(ctx):
@@ -248,9 +248,9 @@ def test_message1_without_new_draws_says_so(ctx):
 def test_message1_ticket_check_and_totals(ctx):
     msg = report.telegram_messages(ctx)[0]
     winner = next(r for r in ctx.settled_this_run if r["winnings"] > 0)
-    assert "<b>My tickets</b>" in msg
-    assert f"• Thu 1 Oct 2026, {winner['numbers']}, Ordinary $1: Group 7 x1, won <b>$10</b>" in msg
-    assert "• Mon 28 Sep 2026, 1 2 3 4 5 6, Ordinary $1: No prize" in msg
+    assert "<b>MY TICKETS</b>" in msg
+    assert f"🟢 Thu 1 Oct 2026, {winner['numbers']}, Ordinary $1: Group 7 x1, won <b>$10</b>" in msg
+    assert "⚪ Mon 28 Sep 2026, 1 2 3 4 5 6, Ordinary $1: No prize" in msg
     assert "All tickets so far: spent $10, won $10, net <b>$0</b>." in msg
     assert "2 tickets ($8) wait for the draw." in msg
     assert "2 lines in Tickets.md could not be read, see Ledger.md." in msg
@@ -275,7 +275,7 @@ def test_message1_many_tickets_drop_the_losing_lines_first(many_tickets_ctx):
     msg = report.telegram_messages(c)[0]
     assert msg == report._tg_join(report._tg_message1(c, 1))  # the most detailed level that fits
     assert_valid_message(msg)
-    assert msg.startswith("<b>WINNER! Your tickets won $130 in this run</b>\n13 winning tickets, details below.")
+    assert msg.startswith("🎉 <b>WINNER</b> · your tickets won $130\n13 winning tickets, details below.")
     assert msg.count("won <b>$10</b>") == 13
     assert "389 other tickets checked won nothing." in msg
     assert "No prize" not in msg
@@ -286,7 +286,7 @@ def test_ticket_levels_cap_and_summarise_the_winners(many_tickets_ctx):
     c = many_tickets_ctx
     level2 = report._tg_tickets(c, 2)
     assert level2.count("won <b>$10</b>") == 10
-    assert "• and 3 more winning tickets" in level2
+    assert "🟢 and 3 more winning tickets" in level2
     level3 = report._tg_tickets(c, 3)
     assert "won <b>" not in level3
     assert "402 tickets checked, 13 won, $130 in total." in level3
@@ -331,7 +331,7 @@ def test_old_fourd_ledger_rows_count_in_the_totals_but_are_never_named(ctx):
     assert c.ledger_totals["spent"] == 11.0 and c.ledger_totals["won"] == 2010.0
     msgs = report.telegram_messages(c)
     assert "All tickets so far: spent $11, won $2,010, net <b>$1,999</b>." in msgs[0]
-    assert "WINNER! Your tickets won $10 in this run" in msgs[0]  # the old win is not new
+    assert "<b>WINNER</b> · your tickets won $10" in msgs[0]  # the old win is not new
     text = report.full_report(c)
     for out in msgs + [text]:
         assert "4D" not in out
@@ -345,14 +345,14 @@ def test_message2_next_draw_block(ctx):
     msg = report.telegram_messages(ctx)[1]
     bs, out = ctx.buy_signal, ctx.outlook
     lines = msg.split("\n")
-    assert lines[0] == "<b>Next TOTO draw</b> (draw 4124): Mon 5 Oct 2026, 6.30pm"
-    assert lines[1] == "Estimated jackpot: <b>$2,100,000</b>"  # read from the page: no worked out mark
-    assert lines[2] == "Draw type: Normal"
-    assert lines[3] == "Jackpot rollovers so far: 1 of 3, then it cascades"
-    assert lines[4] == f"Chance somebody wins Group 1 at this draw: <b>{pct(out.steps[0].chance_won, 0)}</b>"
-    assert lines[5] == "Buy signal: <b>MEDIUM</b>"
+    assert lines[0] == "🔮 <b>NEXT TOTO DRAW</b> · Mon 5 Oct 2026, 6.30pm, draw 4124"
+    assert lines[1] == ""
+    # read from the page: no worked out mark; up on the last draw's $1,000,000 Group 1
+    assert lines[2] == "💰 <b>Jackpot $2,100,000</b> 🟢 <i>UP ▲$1,100,000</i>"
+    assert lines[3] == "🗓 Normal draw · rollovers 1 of 3, then it cascades"
+    assert lines[4] == f"🎯 Somebody wins Group 1: <b>{pct(out.steps[0].chance_won, 0)}</b>"
+    assert lines[5] == f"🟡 Buy signal <b>MEDIUM</b> · <b>{per_dollar(bs.ev_per_dollar)}</b> back per $1 on average"
     assert lines[6] == f"<i>{bs.reason}</i>"
-    assert lines[7] == f"Return per $1: <b>{per_dollar(bs.ev_per_dollar)}</b> on average"
     assert "<pre>Part           Per $1\n" in msg
     assert f"Groups 5 to 7   {per_dollar(bs.ev_breakdown['fixed'])}" in msg
     assert f"Total           {per_dollar(bs.ev_breakdown['total'])}</pre>" in msg
@@ -364,7 +364,7 @@ def test_message2_next_draw_block(ctx):
 
 def test_message2_order_of_blocks(ctx):
     msg = report.telegram_messages(ctx)[1]
-    order = ["<b>Next TOTO draw</b>", "<b>Next big prize</b>", "Over 260 stored draws", "<i>Every draw is independent."]
+    order = ["<b>NEXT TOTO DRAW</b>", "<b>NEXT BIG PRIZE</b>", "Over 260 stored draws", "⚖️ Every draw is independent."]
     positions = [msg.index(s) for s in order]
     assert positions == sorted(positions)
     assert msg.count("independent") == 1
@@ -374,9 +374,9 @@ def test_message2_cascade_draw_with_high_label(ctx):
     cascade = cascade_next_toto(ctx)
     assert cascade.buy_signal.label == "HIGH"
     msg = report.telegram_messages(cascade)[1]
-    assert "Buy signal: <b>HIGH</b>" in msg
-    assert "Draw type: <b>Cascade draw</b>" in msg
-    assert "Estimated jackpot: <b>$4,500,000</b>\n" in msg
+    assert "Buy signal <b>HIGH</b>" in msg
+    assert "<b>Cascade draw</b>" in msg
+    assert "<b>Jackpot $4,500,000</b>" in msg
     assert "Cascaded jackpot" in msg
     assert ("The next draw is the cascade draw: about $4,500,000. If nobody wins it, the jackpot goes to the "
             "Group 2 winners.") in msg
@@ -386,9 +386,9 @@ def test_message2_cascade_draw_with_high_label(ctx):
 def test_message2_hongbao_draw(ctx):
     c = rebuilt(ctx, HONGBAO_FRI)
     msg = report.telegram_messages(c)[1]
-    assert msg.startswith("<b>Next TOTO draw</b> (draw 4124): Fri 9 Oct 2026, 9.30pm\n")
-    assert "Draw type: <b>Hongbao draw</b>" in msg
-    assert "Jackpot rollovers so far: 1\n" in msg  # a Hongbao draw has its own jackpot, it does not cascade on
+    assert msg.startswith("🔮 <b>NEXT TOTO DRAW</b> · Fri 9 Oct 2026, 9.30pm, draw 4124\n")
+    assert "<b>Hongbao draw</b>" in msg
+    assert "rollovers 1\n" in msg  # a Hongbao draw has its own jackpot, it does not cascade on
     assert "then it cascades" not in msg
     assert "The next draw is a Hongbao draw with a jackpot of about $4,000,000." in msg
     assert "Announced special draws: Fri 9 Oct 2026 (Hongbao)." in msg
@@ -402,9 +402,9 @@ def test_message2_jackpot_worked_out_from_past_results(ctx):
     amount = money(c.outlook.jackpot)
     assert amount != "$2,100,000"
     msg = report.telegram_messages(c)[1]
-    assert f"Estimated jackpot: <b>{amount}</b> <i>(worked out from past results)</i>\n" in msg
-    assert "Buy signal: <b>MEDIUM</b>" in msg
-    assert f"Return per $1: <b>{per_dollar(c.buy_signal.ev_per_dollar)}</b>" in msg
+    assert f"<b>Jackpot {amount}</b> <i>(worked out from past results)</i>" in msg
+    assert "Buy signal <b>MEDIUM</b>" in msg
+    assert f"<b>{per_dollar(c.buy_signal.ev_per_dollar)}</b> back per $1" in msg
     assert report.jackpot_text(sig) == f"{amount} (worked out from past results)"
     text = report.full_report(c)
     assert md_cell(text, "Estimated jackpot") == f"{amount} (worked out from past results)"
@@ -427,9 +427,9 @@ def test_jackpot_text_when_nothing_is_known():
 def test_message2_without_next_draw_page_uses_schedule(ctx):
     c = rebuilt(ctx, None)
     msg = report.telegram_messages(c)[1]
-    assert msg.startswith("<b>Next TOTO draw</b>: Mon 5 Oct 2026, 6.30pm (regular schedule, not announced yet)\n")
+    assert msg.startswith("🔮 <b>NEXT TOTO DRAW</b> · Mon 5 Oct 2026, 6.30pm (regular schedule, not announced yet)\n")
     assert "(draw 4124)" not in msg  # a special draw before it would take that number
-    assert f"Estimated jackpot: <b>{money(c.outlook.jackpot)}</b> <i>(worked out from past results)</i>" in msg
+    assert f"<b>Jackpot {money(c.outlook.jackpot)}</b> <i>(worked out from past results)</i>" in msg
 
 
 def test_message2_without_outlook_or_signal(ctx):
@@ -438,16 +438,16 @@ def test_message2_without_outlook_or_signal(ctx):
     assert sig["jackpot"] == 2_100_000.0 and not sig["jackpot_worked_out"]
     assert sig["rollovers"] == 1 and sig["label"] is None and sig["ev"] is None
     msg = report.telegram_messages(c)[1]
-    assert "Estimated jackpot: <b>$2,100,000</b>" in msg
-    assert "Buy signal: <b>not available</b>" in msg
-    assert "Next big prize" not in msg and "Chance somebody wins" not in msg
+    assert "<b>Jackpot $2,100,000</b>" in msg
+    assert "Buy signal <b>not available</b>" in msg
+    assert "Next big prize" not in msg and "Somebody wins Group 1" not in msg
     assert "stored draws" not in msg
-    assert "Return per $1" not in msg
+    assert "back per $1" not in msg
 
 
 def test_message2_with_nothing_stored(scenarios):
     msg = report.telegram_messages(scenarios["empty_history"])[1]
-    assert msg.startswith("<b>Next TOTO draw</b>: not announced yet\nEstimated jackpot: not available yet\n")
+    assert msg.startswith("🔮 <b>NEXT TOTO DRAW</b> · not announced yet\n\n💰 Jackpot not available yet\n")
     assert "No TOTO result is stored yet." in report.telegram_messages(scenarios["empty_history"])[0]
 
 
@@ -475,9 +475,9 @@ def test_message2_next_big_prize_block(ctx):
     big = out.biggest
     assert big is out.steps[-1]
     msg = report.telegram_messages(ctx)[1]
-    block = msg[msg.index("<b>Next big prize</b>"):]
+    block = msg[msg.index("<b>NEXT BIG PRIZE</b>"):]
     assert block.startswith(
-        f"<b>Next big prize</b>\nIf nobody wins Group 1 first, the jackpot snowballs to about {money(big.jackpot)} "
+        f"<b>NEXT BIG PRIZE</b> · about {report.short_money(big.jackpot)} on Mon 12 Oct\nIf nobody wins Group 1 first, the jackpot snowballs to about {money(big.jackpot)} "
         f"at the cascade draw on Mon 12 Oct 2026 ({pct(big.chance_reached, 0)} chance it gets that far). The "
         f"chance somebody wins it before then is about {pct(1 - reached, 0)}.\n<pre>Draw        Jackpot  Unwon  Won\n")
     assert f"Mon 5 Oct    {report.short_money(2_100_000)}   100%  {pct(out.steps[0].chance_won, 0)}\n" in block
@@ -502,7 +502,7 @@ def test_message2_history_line(ctx):
             f"{fmt_num(h.average_run, 1)} draws on average and the biggest was {money(top['jackpot'])} on "
             f"{fmt_date(top['draw_date'])}.")
     assert report.history_line(h) == line
-    assert f"\n\n{line}\n\n" in report.telegram_messages(ctx)[1]
+    assert f"<blockquote expandable>📜 {line}\n\n⚖️ " in report.telegram_messages(ctx)[1]
 
 
 def test_message2_commentary_is_escaped(ctx):
@@ -516,7 +516,7 @@ def test_commentary_does_not_repeat_the_odds_statement(ctx):
                                 "The jackpot is bigger than last week.")
     msg = report.telegram_messages(c)[1]
     assert msg.count("independent") == 1
-    assert "<i>The jackpot is bigger than last week.</i>" in msg
+    assert "💬 The jackpot is bigger than last week.</blockquote>" in msg
     text = report.full_report(c)
     assert text.count("independent") == 1
     assert "*Commentary:* The jackpot is bigger than last week." in text
@@ -534,7 +534,7 @@ def _long_commentary(n: int) -> str:
     return (sentence * (n // len(sentence) + 1))[:n].rsplit(" ", 1)[0] + "."
 
 
-@pytest.mark.parametrize("length,level", [(2000, 0), (2700, 2), (2950, 3), (3200, 4)])
+@pytest.mark.parametrize("length,level", [(2000, 0), (2700, 2), (2850, 3), (3200, 4)])
 def test_message2_drops_detail_level_by_level(ctx, length, level):
     c = variant(ctx, commentary=_long_commentary(length))
     msg = report.telegram_messages(c)[1]
@@ -549,9 +549,9 @@ def test_message2_drops_detail_level_by_level(ctx, length, level):
     assert ("Unwon" in msg) == (level < 4)
     assert ("The jackpot keeps growing" in msg) == (level < 4)
     # Always kept: the headline figures, the big prize sentence and the odds.
-    assert "Estimated jackpot: <b>$2,100,000</b>" in msg and "Buy signal: <b>MEDIUM</b>" in msg
+    assert "<b>Jackpot $2,100,000</b>" in msg and "Buy signal <b>MEDIUM</b>" in msg
     assert "the jackpot snowballs to about" in msg
-    assert "<i>Every draw is independent." in msg
+    assert "⚖️ Every draw is independent." in msg
 
 
 def test_fit_drops_whole_blocks_when_too_long():
@@ -831,9 +831,9 @@ def test_next_draw_page_showing_the_draw_just_held_is_not_used(ctx):
     assert sig["jackpot_worked_out"]
     msg = report.telegram_messages(stale)[1]
     assert "$5,000,000" not in msg
-    assert msg.startswith("<b>Next TOTO draw</b>: Mon 5 Oct 2026, 6.30pm (regular schedule, not announced yet)")
-    assert f"Estimated jackpot: <b>{money(sig['jackpot'])}</b> <i>(worked out from past results)</i>" in msg
-    assert "Buy signal: <b>MEDIUM</b>" in msg
+    assert msg.startswith("🔮 <b>NEXT TOTO DRAW</b> · Mon 5 Oct 2026, 6.30pm (regular schedule, not announced yet)")
+    assert f"<b>Jackpot {money(sig['jackpot'])}</b> <i>(worked out from past results)</i>" in msg
+    assert "Buy signal <b>MEDIUM</b>" in msg
     assert "$5,000,000" not in report.full_report(stale)
     # Even a hand made context whose signal still holds the old page jackpot shows the outlook's.
     assert "$5,000,000" not in report.telegram_messages(variant(ctx, next_toto=held))[1]
@@ -870,7 +870,7 @@ def test_next_draw_after_a_missed_draw_has_no_number(ctx):
     assert nd.when_text == "Thu 8 Oct 2026, 6.30pm (results are not up to date)"
     msgs = report.telegram_messages(c)
     assert "Results not up to date: the newest stored result is draw 4123" in msgs[0]
-    assert msgs[1].startswith("<b>Next TOTO draw</b>: Thu 8 Oct 2026, 6.30pm (results are not up to date)")
+    assert msgs[1].startswith("🔮 <b>NEXT TOTO DRAW</b> · Thu 8 Oct 2026, 6.30pm (results are not up to date)")
     assert "4124" not in msgs[1] and "4125" not in msgs[1]
     for msg in msgs:
         assert_valid_message(msg)
@@ -887,7 +887,7 @@ def test_page_date_after_a_moved_draw_keeps_its_number_when_results_are_up_to_da
     assert report.stale_text(c) is None
     msgs = report.telegram_messages(c)
     assert "not up to date" not in msgs[0] and "not up to date" not in msgs[1]
-    assert msgs[1].startswith("<b>Next TOTO draw</b> (draw 4125): Fri 9 Oct 2026, 9.30pm\n")
+    assert msgs[1].startswith("🔮 <b>NEXT TOTO DRAW</b> · Fri 9 Oct 2026, 9.30pm, draw 4125\n")
     # Still marked stale when the site has a newer draw than the stored ones, or when this run
     # did not read the site.
     behind = variant(c, warnings=["TOTO: the newest stored draw (4124) does not match the latest draw on "
@@ -907,7 +907,7 @@ def test_schedule_date_after_a_lagging_next_draw_page_has_no_number(ctx):
     nd = report.next_draw(c)
     assert nd.from_schedule and nd.number is None and not nd.stale and str(nd.day) == "2026-10-08"
     msgs = report.telegram_messages(c)
-    assert msgs[1].startswith("<b>Next TOTO draw</b>: Thu 8 Oct 2026, 6.30pm (regular schedule, not announced "
+    assert msgs[1].startswith("🔮 <b>NEXT TOTO DRAW</b> · Thu 8 Oct 2026, 6.30pm (regular schedule, not announced "
                               "yet)\n")
     for msg in msgs:
         assert "draw 4125" not in msg and "4125)" not in msg
@@ -927,7 +927,7 @@ def test_draw_held_earlier_today_gets_no_signal(ctx):
     assert "<i>TOTO draw 4124 was held at 6.30pm today, result not out yet.</i>" in msgs[0]
     assert "(draw held, result not out yet)" in msgs[1]
     assert "Its sales are closed, so there is no buy signal for it." in msgs[1]
-    assert "Buy signal" not in msgs[1] and "Return per $1" not in msgs[1] and "Sales estimate" not in msgs[1]
+    assert "Buy signal" not in msgs[1] and "back per $1" not in msgs[1] and "Sales estimate" not in msgs[1]
     for msg in msgs:
         assert_valid_message(msg)
     text = report.full_report(late)
@@ -970,8 +970,8 @@ def test_a_corrected_ticket_counts_only_what_it_won_above_the_old_check(ctx):
     assert len(c.settled_this_run) == 1
     assert report.run_winnings(c) == (pytest.approx(20.0), 1)
     msg = report.telegram_messages(c)[0]
-    assert msg.startswith("<b>WINNER! Your tickets won $20 in this run</b>")
-    assert (f"• Thu 1 Oct 2026, {g7}, Ordinary $3: Group 7 x1, corrected from {g7} Ordinary $1, was won $10, "
+    assert msg.startswith("🎉 <b>WINNER</b> · your tickets won $20")
+    assert (f"🟢 Thu 1 Oct 2026, {g7}, Ordinary $3: Group 7 x1, corrected from {g7} Ordinary $1, was won $10, "
             "now won <b>$30</b>") in msg
     assert report.CORRECTION_HINT in msg
     assert "All tickets so far: spent $3, won $30, net <b>$27</b>." in msg
@@ -1048,15 +1048,16 @@ def test_guard_no_removed_feature_in_messages_or_report(name, scenarios):
 
 def test_guard_no_removed_feature_in_the_notes(ctx, tmp_path):
     written = _notes_text(ctx, tmp_path)
-    assert {"Dashboard.md", "Ledger.md", "Draws/TOTO/2026-10-01 TOTO 4123.md",
-            "Reports/2026-10-01 1930 Report.md"} <= set(written)
+    assert {"Home.md", "Ledger.md", "Draws/TOTO/2026-10-01 TOTO 4123.md",
+            "Reports/2026/10/2026-10-01 1930 Report.md"} <= set(written)
     # The only 4D mention allowed: the user's own 4D line in Tickets.md and why it is not counted.
     bad = next(t for t in ctx.bad_ticket_lines if t.game == "4D")
     allowed = (tickets.FOURD_NOT_TRACKED, bad.source)
     assert tickets.FOURD_NOT_TRACKED in written["Ledger.md"]
     for rel, text in written.items():
         assert forbidden_mentions(text, allowed) == [], rel
-        assert not has_prose_dashes(text), rel
+        # The activity log is a bullet list: its "- " markers are list syntax, not prose.
+        assert not has_prose_dashes(re.sub(r"(?m)^- ", "", text)), rel
     clean = _notes_text(make_context(bad_ticket_lines=False), tmp_path / "clean")
     for rel, text in clean.items():
         assert forbidden_mentions(text) == [], rel

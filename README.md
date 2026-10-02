@@ -288,7 +288,7 @@ Run these once before leaving the bot to its schedule. With the Docker app, type
 | 3 | `python -m huatbot run --dry-run` | A real run: fills the vault, downloads the full history, writes the notes and the report, and prints the two messages instead of posting them. The first download is over 1,100 result pages, so give it about 10 to 20 minutes. Later runs only fetch the new draws. |
 | 4 | `python -m huatbot serve` | The scheduler. This is what the container runs by default, so `docker compose up -d` (or the Docker app project) starts it. |
 
-After step 3, open the vault in Obsidian and look at `Huat Bot/Dashboard.md`. Edit
+After step 3, open the vault in Obsidian and look at `Huat Bot/Home.md`. Edit
 `Huat Bot/Settings.md` to set your jackpot alert, and add your tickets to `Huat Bot/Tickets.md`.
 
 ## The vault
@@ -302,7 +302,7 @@ MyVault/
 └── Huat Bot/
     ├── Settings.md                     you edit: jackpot alert and options as note properties
     ├── Tickets.md                      you edit: one ticket per table row
-    ├── Dashboard.md                    next draw, buy signal, the next big prize, latest result, totals
+    ├── Home.md                    next draw, buy signal, the next big prize, latest result, totals
     ├── Ledger.md                       every ticket, what it won, totals, unreadable lines
     ├── Draws/TOTO/2026-10-01 TOTO 4123.md
     ├── Reports/2026-10-02 1930 Report.md
@@ -316,7 +316,7 @@ MyVault/
 
 | You edit | The bot writes |
 | --- | --- |
-| `Settings.md`: the properties at the top of the note (see [Settings](#settings)). Read at the start of every run. | `Dashboard.md`, `Ledger.md`, draw notes, reports and the activity log. They are rewritten by the bot, so do not edit them (your changes would be replaced). |
+| `Settings.md`: the properties at the top of the note (see [Settings](#settings)). Read at the start of every run. | `Home.md`, `Ledger.md`, draw notes, reports and the activity log. They are rewritten by the bot, so do not edit them (your changes would be replaced). |
 | `Tickets.md`: one row per ticket in the table. | `Data/*.csv` and the JSON files. You can open the CSVs in a spreadsheet, but keep the bot stopped while you edit them. |
 
 `Settings.md` and `Tickets.md` are created with defaults and examples on the first run (or with
@@ -363,7 +363,18 @@ The schedule always uses Singapore time, whatever the NAS time zone is.
 
 ## Commands
 
-All commands are `python -m huatbot <command> [options]`. Each one exits with 0 when it worked and 1
+In Telegram (while `serve` runs, only in the bot's own chat and forum topic):
+
+| Command | What it does |
+| --- | --- |
+| `/huat` | Resends the latest two messages (result and next draw) |
+| `/huatnext` | Resends the next draw message |
+| `/huathelp` | Lists the commands |
+
+The last message of every post carries 🔄 Latest result and 🔮 Next draw buttons. Commands only
+resend what the last run saved: they never contact Singapore Pools or Claude.
+
+On the command line, all commands are `python -m huatbot <command> [options]`. Each one exits with 0 when it worked and 1
 when it did not. `python -m huatbot --help` lists them and `python -m huatbot --version` shows the
 version.
 

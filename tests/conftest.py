@@ -41,3 +41,10 @@ def fixture_html():
     def _read(name: str) -> str:
         return (FIXTURES / name).read_text(encoding="utf-8")
     return _read
+
+
+@pytest.fixture(autouse=True)
+def no_telegram_listener(monkeypatch):
+    """serve starts the command listener; tests must never long poll the real Bot API."""
+    from huatbot import listener
+    monkeypatch.setattr(listener, "start", lambda vault: None)

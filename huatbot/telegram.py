@@ -1,6 +1,7 @@
 """Post messages to a Telegram chat or channel through the Bot API (plain ``requests``).
 
-Only one endpoint is used: ``sendMessage``. Rate limits (HTTP 429) are honoured using the
+``sendMessage`` posts the reports; ``getUpdates`` and ``answerCallbackQuery`` serve the command
+listener (``listener.py``). Rate limits (HTTP 429) are honoured using the
 ``retry_after`` value Telegram returns; server errors and connection problems are retried with
 a short exponential backoff. The bot token is never written to logs or error messages.
 """
@@ -44,8 +45,49 @@ def _clean_env(value: str | None) -> str | None:
 
 
 def config_from_env() -> tuple[str | None, str | None]:
-    """(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID) from the environment; missing or blank -> None."""
+    """(TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID) from the environment; missing or blank -> None.
+
+    A forum topic is part of the chat id as ``-100123/456`` (see ``split_chat``)."""
     return _clean_env(os.environ.get("TELEGRAM_BOT_TOKEN")), _clean_env(os.environ.get("TELEGRAM_CHAT_ID"))
+
+
+def split_chat(chat_id: str | int) -> tuple[str, int | None]:
+    """ "-100123/456" -> ("-100123", 456): a chat plus the forum topic (message_thread_id).
+    TELEGRAM_THREAD_ID, when set, names the topic instead."""
+    chat, _, topic = str(chat_id).strip().partition("/")
+    topic = topic.strip() or (_clean_env(os.environ.get("TELEGRAM_THREAD_ID")) or "")
+    return chat.strip(), int(topic) if topic.lstrip("-").isdigit() else None
+
+
+def _call(token: str, method: str, payload: dict, *, session: Any = None, timeout: float = REQUEST_TIMEOUT,
+          api_base: str = API_BASE) -> dict:
+    """One Bot API call, no retries (the listener loops anyway). Raises TelegramError, token redacted."""
+    http = session if session is not None else requests
+    try:
+        resp = http.post(f"{api_base.rstrip('/')}/bot{token}/{method}", json=payload, timeout=timeout)
+    except (requests.RequestException, OSError) as exc:
+        raise TelegramError(_short_error(exc, token)) from None
+    data = _json(resp)
+    if not data.get("ok"):
+        raise TelegramError(_redact(f"{method} failed: {_description(data, int(getattr(resp, 'status_code', 0) or 0))}",
+                                    token))
+    return data
+
+
+def get_updates(token: str, offset: int | None, *, wait: int = 50, **kw: Any) -> list[dict]:
+    """Long poll for new messages and button presses (``wait`` seconds at most)."""
+    payload: dict[str, Any] = {"timeout": wait, "allowed_updates": ["message", "callback_query"]}
+    if offset is not None:
+        payload["offset"] = offset
+    return list(_call(token, "getUpdates", payload, timeout=wait + 15, **kw).get("result") or [])
+
+
+def answer_callback(token: str, callback_id: str, text: str = "", **kw: Any) -> None:
+    """Stop the button's spinner. Never raises (a stale button press is harmless)."""
+    try:
+        _call(token, "answerCallbackQuery", {"callback_query_id": callback_id, "text": text[:190]}, **kw)
+    except TelegramError as exc:
+        log.info("answerCallbackQuery: %s", exc)
 
 
 def message_problems(text: str) -> list[str]:
@@ -117,6 +159,7 @@ def send_message(
     *,
     timeout: float = REQUEST_TIMEOUT,
     api_base: str = API_BASE,
+    reply_markup: dict | None = None,
 ) -> dict:
     """Send one message and return Telegram's JSON reply ({"ok": true, "result": {...}}).
 
@@ -139,9 +182,14 @@ def send_message(
         )
 
     url = f"{api_base.rstrip('/')}/bot{token}/sendMessage"
-    payload: dict[str, Any] = {"chat_id": chat_id, "text": text, "disable_web_page_preview": True}
+    chat, topic = split_chat(chat_id)
+    payload: dict[str, Any] = {"chat_id": chat, "text": text, "disable_web_page_preview": True}
+    if topic is not None:
+        payload["message_thread_id"] = topic
     if parse_mode:
         payload["parse_mode"] = parse_mode
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
     http = session if session is not None else requests
 
     attempts = max(1, int(retries) + 1)
@@ -186,7 +234,7 @@ def send_message(
             log.warning("Telegram could not parse the %s message (%s), sending it as plain text", parse_mode, desc)
             return send_message(
                 token, chat_id, html_to_plain(text), parse_mode=None, session=session, retries=retries,
-                sleep=sleep, timeout=timeout, api_base=api_base,
+                sleep=sleep, timeout=timeout, api_base=api_base, reply_markup=reply_markup,
             )
 
         raise TelegramError(_redact(f"Telegram refused the message: {desc}", token))
@@ -202,6 +250,7 @@ def post_messages(
     out: Callable[[str], Any] = print,
     pause: float = 1.0,
     on_sent: Callable[[int], Any] | None = None,
+    reply_markup: dict | None = None,
     **kw: Any,
 ) -> bool:
     """Post the messages in order. Returns True only when every message was posted.
@@ -213,6 +262,7 @@ def post_messages(
     ``on_sent(i)`` is called right after message i (1 based) went out, so a caller can record
     progress and resume after a failure without posting a message twice.
     ``pause`` seconds pass between messages; other keywords go to ``send_message``.
+    ``reply_markup`` (inline buttons) goes on the last message only.
     """
     messages = list(messages)
     total = len(messages)
@@ -250,7 +300,7 @@ def post_messages(
         if i > 1 and pause:
             sleep(pause)
         try:
-            send_message(token, chat_id, text, **kw)
+            send_message(token, chat_id, text, reply_markup=reply_markup if i == total else None, **kw)
         except TelegramError as exc:
             raise TelegramError(f"Posted {i - 1} of {total} messages, message {i} failed: {exc}") from exc
         log.info("Posted Telegram message %d of %d", i, total)

@@ -17,7 +17,7 @@ from huatbot import vault as V
 from huatbot.textfmt import has_prose_dashes
 from huatbot.vault import SG, Vault, fmt_log_time, parse_note, render_note
 
-LOG_REL = "Logs/2026-10 Activity.md"
+LOG_REL = "Activity/2026/10/2026-10-02.md"
 
 
 @pytest.fixture
@@ -101,11 +101,11 @@ def test_ensure_layout_creates_folders_and_templates_once(vault):
     templates = {"Settings.md": "---\na: 1\n---\n# Settings\n", "Tickets.md": "# Tickets\n"}
     created = vault.ensure_layout(templates)
     assert created == ["Settings.md", "Tickets.md"]
-    for sub in ("Data", "Draws/TOTO", "Reports", "Logs"):
+    for sub in ("Data", "Draws/TOTO", "Reports", "Activity"):
         assert (vault.base / sub).is_dir(), sub
     # Only TOTO: no 4D draw notes and no suggestion notes any more.
-    assert _tree(vault.base) == {"Data", "Draws", "Draws/TOTO", "Reports", "Logs", "Settings.md", "Tickets.md"}
-    assert V.LAYOUT_FOLDERS == ("Draws/TOTO", "Reports", "Logs")
+    assert _tree(vault.base) == {"Data", "Draws", "Draws/TOTO", "Reports", "Activity", "Settings.md", "Tickets.md"}
+    assert V.LAYOUT_FOLDERS == ("Draws/TOTO", "Reports", "Activity")
     assert vault.read_text("Settings.md") == templates["Settings.md"]
 
     # The user edits a note in Obsidian; a second layout pass must not overwrite it.
@@ -130,7 +130,7 @@ def test_never_touches_obsidian_folder_or_outside_files(tmp_path):
 
     v = Vault(root)
     v.ensure_layout({"Settings.md": "x\n"})
-    v.write_note("Dashboard.md", "# Dashboard", {"tags": ["huatbot"]})
+    v.write_note("Home.md", "# Dashboard", {"tags": ["huatbot"]})
     v.log("RUN", "Started", when=datetime(2026, 10, 2, 19, 30, tzinfo=SG))
     v.save_state({"a": 1})
 
@@ -158,14 +158,14 @@ def test_write_and_read_note_round_trip(vault):
         "detail": "Group 7 x3: yes",
         "words": "Huat ah",
     }
-    body = "# TOTO draw 4123\n\nBack to [[Dashboard]]"
+    body = "# TOTO draw 4123\n\nBack to [[Home]]"
     assert vault.write_note("Draws/TOTO/2026-10-01 TOTO 4123.md", body, fm) is True
 
     path = vault.base / "Draws" / "TOTO" / "2026-10-01 TOTO 4123.md"
     text = path.read_text(encoding="utf-8")
     assert text.startswith("---\ntags: [huatbot, toto]\ngame: TOTO\ndraw: 4123\n")
     assert "numbers: [3, 11, 19, 27, 38, 45]\n" in text
-    assert text.endswith("---\n# TOTO draw 4123\n\nBack to [[Dashboard]]\n")
+    assert text.endswith("---\n# TOTO draw 4123\n\nBack to [[Home]]\n")
 
     # The properties block is plain YAML that a strict safe loader accepts.
     block = text.split("---\n")[1]
@@ -183,13 +183,13 @@ def test_write_and_read_note_round_trip(vault):
 
 
 def test_unchanged_note_is_not_rewritten(vault, monkeypatch):
-    assert vault.write_note("Dashboard.md", "# Dashboard\n", {"tags": ["huatbot"]}) is True
+    assert vault.write_note("Home.md", "# Dashboard\n", {"tags": ["huatbot"]}) is True
     calls = []
     monkeypatch.setattr(V, "atomic_write_text", lambda *a, **k: calls.append(a))
-    assert vault.write_note("Dashboard.md", "# Dashboard\n", {"tags": ["huatbot"]}) is False
-    assert vault.write_note("Dashboard.md", "# Dashboard", {"tags": ["huatbot"]}) is False  # same after newline fix
+    assert vault.write_note("Home.md", "# Dashboard\n", {"tags": ["huatbot"]}) is False
+    assert vault.write_note("Home.md", "# Dashboard", {"tags": ["huatbot"]}) is False  # same after newline fix
     assert calls == []
-    assert vault.write_note("Dashboard.md", "# Dashboard v2\n", {"tags": ["huatbot"]}) is True
+    assert vault.write_note("Home.md", "# Dashboard v2\n", {"tags": ["huatbot"]}) is True
     assert len(calls) == 1
 
 
@@ -276,65 +276,70 @@ def test_no_temp_files_left_behind(vault):
 # Activity log
 
 
-def test_log_creates_monthly_note_with_title_and_header(vault):
+def test_log_creates_daily_note_with_frontmatter_and_title(vault):
     vault.log("FETCH", "2 new TOTO draws", when=datetime(2026, 10, 2, 19, 30, tzinfo=SG))
     text = vault.read_text(LOG_REL)
     assert text == (
-        "# Huat Bot activity, October 2026\n\n"
-        "| Time | Event | Details |\n"
-        "| --- | --- | --- |\n"
-        "| Fri 2 Oct 2026 7.30pm | FETCH | 2 new TOTO draws |\n"
+        "---\ntags: [huatbot, activity]\nupdated: '2026-10-02'\n---\n"
+        "# Huat Bot activity, 2 October 2026\n\n"
+        "- 19:30 📥 **FETCH** · 2 new TOTO draws\n"
     )
 
 
-def test_log_appends_rows_in_order(vault):
+def test_log_appends_lines_in_order(vault):
     vault.log("RUN", "Started", when=datetime(2026, 10, 2, 19, 30, tzinfo=SG))
-    vault.log("note", "Wrote [[Dashboard]]", when=datetime(2026, 10, 2, 19, 31, tzinfo=SG))
+    vault.log("note", "Wrote [[Home]]", when=datetime(2026, 10, 2, 19, 31, tzinfo=SG))
     lines = vault.read_text(LOG_REL).splitlines()
-    assert lines[-2] == "| Fri 2 Oct 2026 7.30pm | RUN | Started |"
-    assert lines[-1] == "| Fri 2 Oct 2026 7.31pm | NOTE | Wrote [[Dashboard]] |"
-    assert sum(1 for line in lines if line.startswith("| Time |")) == 1
+    assert lines[-2] == "- 19:30 ▶️ **RUN** · Started"
+    assert lines[-1] == "- 19:31 📝 **NOTE** · Wrote [[Home]]"
+    assert sum(1 for line in lines if line.startswith("# ")) == 1
 
 
-def test_log_escapes_pipes_and_flattens_newlines(vault):
+def test_log_flattens_newlines_and_dashes(vault):
     vault.log("ERROR", "bad | value\nsecond line - with dash \u2014 here",
               when=datetime(2026, 10, 2, 19, 30, tzinfo=SG))
     row = vault.read_text(LOG_REL).splitlines()[-1]
-    assert row == "| Fri 2 Oct 2026 7.30pm | ERROR | bad \\| value second line, with dash, here |"
-    assert vault.read_text(LOG_REL).count("\n") == 5  # title, blank, header, rule, one row
+    assert row == "- 19:30 ❌ **ERROR** · bad | value second line, with dash, here"
 
 
 def test_log_keeps_iso_dates_and_wikilink_aliases(vault):
     vault.log("NOTE", "[[Draws/TOTO/2026-10-01 TOTO 4123|TOTO 4123]]", when=datetime(2026, 10, 2, 19, 30, tzinfo=SG))
     row = vault.read_text(LOG_REL).splitlines()[-1]
-    assert "[[Draws/TOTO/2026-10-01 TOTO 4123\\|TOTO 4123]]" in row
+    assert "[[Draws/TOTO/2026-10-01 TOTO 4123|TOTO 4123]]" in row
 
 
-def test_log_month_rollover_and_time_zones(vault):
+def test_log_day_rollover_and_time_zones(vault):
     # 16:05 UTC on 31 Oct is 12.05am on 1 Nov in Singapore.
     vault.log("RUN", "late", when=datetime(2026, 10, 31, 16, 5, tzinfo=timezone.utc))
-    text = vault.read_text("Logs/2026-11 Activity.md")
-    assert text.startswith("# Huat Bot activity, November 2026\n")
-    assert "| Sun 1 Nov 2026 12.05am | RUN | late |" in text
+    text = vault.read_text("Activity/2026/11/2026-11-01.md")
+    assert "# Huat Bot activity, 1 November 2026\n" in text
+    assert "- 00:05 ▶️ **RUN** · late" in text
     # A naive time is taken as Singapore time.
-    vault.log("RUN", "naive", when=datetime(2026, 10, 5, 12, 0))
-    assert "| Mon 5 Oct 2026 12.00pm | RUN | naive |" in vault.read_text(LOG_REL)
+    vault.log("RUN", "naive", when=datetime(2026, 10, 2, 12, 0))
+    assert "- 12:00 ▶️ **RUN** · naive" in vault.read_text(LOG_REL)
 
 
 def test_log_default_time_is_now(vault):
     vault.log("RUN", "now")
-    files = list((vault.base / "Logs").glob("* Activity.md"))
-    assert len(files) == 1 and "| RUN | now |" in files[0].read_text()
+    files = list((vault.base / "Activity").rglob("*.md"))
+    assert len(files) == 1 and "**RUN** · now" in files[0].read_text(encoding="utf-8")
 
 
-def test_log_starts_new_table_after_user_text(vault):
+def test_log_appends_after_user_text(vault):
     vault.log("RUN", "one", when=datetime(2026, 10, 2, 19, 30, tzinfo=SG))
     path = vault.path(LOG_REL)
-    path.write_text(path.read_text() + "\nMy own note under the table.\n")
+    path.write_text(path.read_text(encoding="utf-8") + "\nMy own note.\n", encoding="utf-8")
     vault.log("RUN", "two", when=datetime(2026, 10, 2, 19, 40, tzinfo=SG))
-    text = path.read_text()
-    assert text.count("| Time | Event | Details |") == 2
-    assert text.endswith("| --- | --- | --- |\n| Fri 2 Oct 2026 7.40pm | RUN | two |\n")
+    text = path.read_text(encoding="utf-8")
+    assert text.endswith("My own note.\n- 19:40 ▶️ **RUN** · two\n")
+
+
+def test_recent_activity_is_newest_first_and_capped(vault):
+    vault.log("RUN", "old", when=datetime(2026, 10, 1, 9, 0, tzinfo=SG))
+    vault.log("RUN", "new", when=datetime(2026, 10, 2, 9, 0, tzinfo=SG))
+    text = vault.recent_activity(datetime(2026, 10, 2, 10, 0, tzinfo=SG))
+    assert text.splitlines() == ["2026-10-02 09:00 ▶️ **RUN** · new", "2026-10-01 09:00 ▶️ **RUN** · old"]
+    assert vault.recent_activity(datetime(2026, 10, 2, 10, 0, tzinfo=SG), limit=40).count("\n") == 0
 
 
 def test_log_never_raises(vault, monkeypatch, caplog):
@@ -396,8 +401,8 @@ def test_state_round_trip_and_unchanged_skip(vault, monkeypatch):
 
 
 def _activity_rows(vault, event):
-    return [line for p in vault.path("Logs").glob("*Activity.md") for line in p.read_text().splitlines()
-            if f"| {event} |" in line]
+    return [line for p in vault.path("Activity").rglob("*.md") for line in p.read_text(encoding="utf-8").splitlines()
+            if f"**{event}** · " in line]
 
 
 def test_load_state_survives_corrupt_file(vault, caplog):
@@ -412,7 +417,7 @@ def test_load_state_survives_corrupt_file(vault, caplog):
     assert len(kept) == 1 and kept[0].read_text() == '{"skip": {"toto": [4000],}}'
     errors = _activity_rows(vault, "ERROR")
     assert len(errors) == 1 and kept[0].name in errors[0] and "not valid JSON" in errors[0]
-    assert not has_prose_dashes(errors[0])
+    assert not has_prose_dashes(errors[0].split(" · ", 1)[1])
     vault.state_path.write_text("[1, 2]")
     assert vault.load_state() == {}
     assert len(_activity_rows(vault, "ERROR")) == 2

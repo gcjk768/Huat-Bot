@@ -3,8 +3,10 @@
 Every figure shown here was computed elsewhere in Python (sales, buy signal, jackpot outlook,
 ledger); this module only lays it out. House style:
 
-* Telegram messages contain no dash characters at all, use only the <b>, <i>, <pre> and <code>
-  tags, escape all text, and stay within ``constants.TELEGRAM_MAX_CHARS``. When a message would
+* Telegram messages follow the fleet card style: an emoji + <b>TITLE</b> · subtitle header (one
+  fixed emoji per section in ``SECTION_TITLES``), one emoji led line per detail, a divider
+  between sections and background detail last in an expandable blockquote. They contain no
+  dash characters, escape all text, and stay within ``constants.TELEGRAM_MAX_CHARS``. When a message would
   be too long, detail is dropped in whole blocks so a tag is never cut in half.
 * The markdown report has no dashes in prose (tables, frontmatter and [[wikilinks]] may carry
   hyphens) and uses the section headings in ``SECTION_HEADINGS``, in that order.
@@ -80,6 +82,18 @@ EV_PARTS = (
 # the projection table and the commentary.
 _TG_LEVELS = 5
 _TG_MORE = "<i>More detail is in the report note in the vault.</i>"
+DIVIDER = "━━━━━━━━━━━━━━━━"
+# One fixed emoji per Telegram section title.
+SECTION_TITLES = {
+    "result": "🎱", "winner": "🎉", "tickets": "🎫", "next": "🔮", "big": "💎", "more": "📜",
+}
+SIGNAL_MARKERS = {"HIGH": "🟢", "MEDIUM": "🟡", "LOW": "🔴"}
+
+
+def title(section: str, name: str, subtitle: str = "") -> str:
+    """ "🔮 <b>NEXT TOTO DRAW</b> · Mon 5 Oct": a section header in the fleet card style."""
+    head = f"{SECTION_TITLES[section]} <b>{_h(name.upper())}</b>"
+    return f"{head} · {_h(subtitle)}" if subtitle else head
 _TG_WINNERS_CAP = 10
 
 
@@ -327,7 +341,7 @@ def report_note_name(now: datetime) -> str:
 
 
 def activity_note_name(now: datetime) -> str:
-    """ "2026-10 Activity": this month's activity log (see ``vault.log_note_path``)."""
+    """ "2026-10-02": today's activity log note (see ``vault.log_note_path``)."""
     return log_note_path(now).rsplit("/", 1)[-1].removesuffix(".md")
 
 
@@ -861,19 +875,25 @@ def _tg_result(ctx: Context) -> str:
     row = latest_row(ctx.toto)
     if row is None:
         return "No TOTO result is stored yet."
-    number, day = as_int(field(row, "draw_number")), as_date(field(row, "draw_date"))
-    dtype = str(field(row, "draw_type", "normal"))
-    kind = f" ({_h(draw_type_name(dtype))} draw)" if dtype != "normal" else ""
-    head = f"<b>TOTO draw {number}</b>, {fmt_date(day)}{kind}"
-    if not ctx.new_draws:
-        head += "\n<i>No new draw in this run, this is the newest stored result.</i>"
-    return "\n".join([
-        head,
-        f"Winning numbers: <b>{toto_nums(toto_numbers(row))}</b>",
-        f"Additional number: <b>{as_int(field(row, 'additional'))}</b>",
-        "Group 1 prize: <b>{}</b>, {}".format(*(_h(x) for x in _group1_parts(row))),
+    lines = [
+        f"🔢 <b>Winning numbers</b> · <code>{toto_nums(toto_numbers(row))}</code>",
+        f"➕ Additional number · <code>{as_int(field(row, 'additional'))}</code>",
+        "🏆 Group 1 · <b>{}</b>, {}".format(*(_h(x) for x in _group1_parts(row))),
         pre_block(["Group", "Share", "Winners"], _group_rows(row), "lrr"),
-    ])
+    ]
+    if not ctx.new_draws:
+        lines.insert(0, "<i>No new draw in this run, this is the newest stored result.</i>")
+    return "\n".join(lines)
+
+
+def _result_title(ctx: Context) -> str:
+    row = latest_row(ctx.toto)
+    if row is None:
+        return title("result", "TOTO result", fmt_date(to_sg(ctx.now)))
+    dtype = str(field(row, "draw_type", "normal"))
+    kind = f", {draw_type_name(dtype)} draw" if dtype != "normal" else ""
+    return title("result", "TOTO result",
+                 f"Draw {as_int(field(row, 'draw_number'))}, {fmt_date(as_date(field(row, 'draw_date')))}{kind}")
 
 
 def _ticket_line(r: dict, was: dict | None = None) -> str:
@@ -883,6 +903,10 @@ def _ticket_line(r: dict, was: dict | None = None) -> str:
     if won > 0:
         return f"{head}: {_h(r.get('result'))}{fix}, {'now won' if fix else 'won'} <b>{dollars(won)}</b>"
     return f"{head}: {_h(r.get('result') or 'No prize')}{fix}"
+
+
+def _ticket_mark(r: dict) -> str:
+    return "🟢" if (as_float(r.get("winnings")) or 0.0) > 0 else "⚪"
 
 
 def _no_draw_cost(ctx: Context) -> float:
@@ -895,7 +919,7 @@ def _no_draw_cost(ctx: Context) -> float:
 
 
 def _tg_tickets(ctx: Context, level: int) -> str:
-    lines = ["<b>My tickets</b>"]
+    lines = [title("tickets", "My tickets")]
     settled = list(ctx.settled_this_run or [])
     fixes = corrections(ctx)
     winners = sorted((r for r in settled if (as_float(r.get("winnings")) or 0.0) > 0),
@@ -905,14 +929,14 @@ def _tg_tickets(ctx: Context, level: int) -> str:
     if not settled:
         lines.append("No tickets were checked in this run.")
     elif level == 0:
-        lines += [f"• {_ticket_line(r, _was(fixes, r))}" for r in winners + losers]
+        lines += [f"{_ticket_mark(r)} {_ticket_line(r, _was(fixes, r))}" for r in winners + losers]
     elif level <= 2:
         # A corrected ticket is always listed: it changes a result already announced.
         shown = [r for k, r in enumerate(winners) if level == 1 or k < _TG_WINNERS_CAP or _was(fixes, r)]
         fixed_losers = [r for r in losers if _was(fixes, r)]
-        lines += [f"• {_ticket_line(r, _was(fixes, r))}" for r in shown + fixed_losers]
+        lines += [f"{_ticket_mark(r)} {_ticket_line(r, _was(fixes, r))}" for r in shown + fixed_losers]
         if len(shown) < len(winners):
-            lines.append(f"• and {plural(len(winners) - len(shown), 'more winning ticket')}")
+            lines.append(f"🟢 and {plural(len(winners) - len(shown), 'more winning ticket')}")
         if len(losers) > len(fixed_losers):
             lines.append(f"{plural(len(losers) - len(fixed_losers), 'other ticket')} checked won nothing.")
     else:
@@ -928,7 +952,7 @@ def _tg_tickets(ctx: Context, level: int) -> str:
 
     totals = ctx.ledger_totals or {}
     if as_int(totals.get("tickets")):
-        lines.append(f"All tickets so far: spent {dollars(totals.get('spent'))}, won "
+        lines.append(f"📒 All tickets so far: spent {dollars(totals.get('spent'))}, won "
                      f"{dollars(totals.get('won'))}, net <b>{dollars(totals.get('net'))}</b>.")
         pending = as_int(totals.get("pending"))
         if pending:
@@ -950,49 +974,66 @@ def _tg_tickets(ctx: Context, level: int) -> str:
 
 def _tg_message1(ctx: Context, level: int) -> list[str]:
     won, n = run_winnings(ctx)
+    head = _result_title(ctx)
     if won > 0:
-        head = (f"<b>WINNER! Your tickets won {dollars(won)} in this run</b>\n"
-                f"{plural(n, 'winning ticket')}, details below.")
-    else:
-        head = f"<b>Huat Bot TOTO result</b>, {fmt_date(to_sg(ctx.now))}"
+        head = (title("winner", "Winner", f"your tickets won {dollars(won)}") + "\n"
+                + f"{plural(n, 'winning ticket')}, details below.\n\n" + head)
     blocks = [head]
     for notice in (stale_text(ctx), held_text(ctx)):
         if notice:
             blocks.append(f"<i>{_h(notice)}</i>")
     blocks.append(_tg_result(ctx))
+    blocks.append(DIVIDER)
     blocks.append(_tg_tickets(ctx, level))
     return blocks
+
+
+def _jackpot_change(ctx: Context, jackpot: float | None) -> str:
+    """ " 🟢 <i>UP ▲$900,000</i>": the next jackpot against the last draw's Group 1 prize. A
+    bigger jackpot is good news for the reader (green), a reset after a win is not (red)."""
+    row = latest_row(ctx.toto)
+    last = as_float(field(row, "jackpot")) if row is not None else None
+    if jackpot is None or last is None or abs(jackpot - last) < 1:
+        return ""
+    if jackpot > last:
+        return f" 🟢 <i>UP ▲{_h(money(jackpot - last))}</i>"
+    return f" 🔴 <i>RESET ▼{_h(money(last - jackpot))}</i>"
 
 
 def _tg_next_draw(ctx: Context, level: int) -> str:
     sig = toto_signal(ctx)
     nd = next_draw(ctx)
-    draw = f" (draw {nd.number})" if nd.number else ""
     out = ctx.outlook
     first = out.steps[0] if out is not None and out.steps else None
-    lines = [f"<b>Next TOTO draw</b>{draw}: {_h(nd.when_text)}"]
+    sub = nd.when_text + (f", draw {nd.number}" if nd.number else "")
+    lines = [title("next", "Next TOTO draw", sub), ""]
     worked_out = f" <i>({JACKPOT_WORKED_OUT})</i>" if sig["jackpot_worked_out"] else ""
-    lines.append("Estimated jackpot: " + (f"<b>{money(sig['jackpot'])}</b>{worked_out}" if sig["jackpot"] is not None
-                                          else "not available yet"))
     dtype = draw_type_name(sig["draw_type"])
-    lines.append("Draw type: " + (f"<b>{_h(dtype)} draw</b>" if sig["draw_type"] != "normal" else _h(dtype)))
-    lines.append(f"Jackpot rollovers so far: {_h(rollover_text(sig))}")
+    dtype_text = f"<b>{_h(dtype)} draw</b>" if sig["draw_type"] != "normal" else f"{_h(dtype)} draw"
+    if sig["jackpot"] is not None:
+        lines.append(f"💰 <b>Jackpot {money(sig['jackpot'])}</b>{worked_out}{_jackpot_change(ctx, sig['jackpot'])}")
+    else:
+        lines.append("💰 Jackpot not available yet")
+    lines.append(f"🗓 {dtype_text} · rollovers {_h(rollover_text(sig))}")
     if first is not None:
-        lines.append(f"Chance somebody wins Group 1 at this draw: <b>{pct(first.chance_won, 0)}</b>")
+        lines.append(f"🎯 Somebody wins Group 1: <b>{pct(first.chance_won, 0)}</b>")
     if nd.held:
-        lines.append("Its sales are closed, so there is no buy signal for it.")
+        lines.append("⏸ Its sales are closed, so there is no buy signal for it.")
         return "\n".join(lines)
-    lines.append(f"Buy signal: <b>{_h(sig['label'] or 'not available')}</b>")
+    label = sig["label"]
+    marker = SIGNAL_MARKERS.get(str(label or "").upper(), "⚪")
+    signal = f"{marker} Buy signal <b>{_h(label or 'not available')}</b>"
+    if sig["ev"] is not None:
+        signal += f" · <b>{per_dollar(sig['ev'])}</b> back per $1 on average"
+    lines.append(signal)
     if sig["reason"] and level < 3:
         lines.append(f"<i>{_h(sig['reason'])}</i>")
-    if sig["ev"] is not None:
-        lines.append(f"Return per $1: <b>{per_dollar(sig['ev'])}</b> on average")
-        ev_rows = _ev_rows(sig["breakdown"])
-        if ev_rows and level < 4:
-            lines.append(pre_block(["Part", "Per $1"],
-                                   [[r[0].replace(" (fixed prizes)", ""), r[1]] for r in ev_rows], "lr"))
+    ev_rows = _ev_rows(sig["breakdown"]) if sig["ev"] is not None else []
+    if ev_rows and level < 4:
+        lines.append(pre_block(["Part", "Per $1"],
+                               [[r[0].replace(" (fixed prizes)", ""), r[1]] for r in ev_rows], "lr"))
     if sig["boards"] is not None and level < 1:
-        lines.append(f"Sales estimate: about {boards_text(sig['boards'])} boards ({_h(sig['boards_method'])}).")
+        lines.append(f"🎟 Sales estimate: about {boards_text(sig['boards'])} boards ({_h(sig['boards_method'])}).")
     return "\n".join(lines)
 
 
@@ -1000,7 +1041,9 @@ def _tg_big_prize(ctx: Context, level: int) -> str | None:
     out = ctx.outlook
     if out is None or not out.steps:
         return None
-    lines = ["<b>Next big prize</b>"]
+    big = out.biggest
+    when = f" on {short_date(big.draw_date)}" if big is not None and big.draw_date and len(out.steps) > 1 else ""
+    lines = [title("big", "Next big prize", f"about {short_money(big.jackpot)}{when}" if big is not None else "")]
     text = big_prize_text(out)
     if text:
         lines.append(_h(text))
@@ -1011,19 +1054,24 @@ def _tg_big_prize(ctx: Context, level: int) -> str | None:
         lines.append("<i>Unwon: chance nobody has won it by then. Won: chance somebody wins at that draw.</i>")
     special = specials_text(out)
     if special:
-        lines.append(_h(special))
+        lines.append(f"🧧 {_h(special)}")
     return "\n".join(lines)
 
 
 def _tg_message2(ctx: Context, level: int) -> list[str]:
-    blocks = [_tg_next_draw(ctx, level), _tg_big_prize(ctx, level)]
+    blocks = [_tg_next_draw(ctx, level)]
+    big = _tg_big_prize(ctx, level)
+    if big:
+        blocks += [DIVIDER, big]
+    more = []
     hist = history_line(ctx.history)
     if hist and level < 2:
-        blocks.append(_h(hist))
-    blocks.append(f"<i>{_h(odds_line())}</i>")
+        more.append(f"{SECTION_TITLES['more']} {_h(hist)}")
+    more.append(f"⚖️ {_h(odds_line())}")
     comment = commentary_text(ctx.commentary)
     if comment and level < 4:
-        blocks.append(f"<i>{html_escape(comment)}</i>")
+        more.append(f"💬 {html_escape(comment)}")
+    blocks.append("<blockquote expandable>" + "\n\n".join(more) + "</blockquote>")
     return [b for b in blocks if b]
 
 
