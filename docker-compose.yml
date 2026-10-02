@@ -15,6 +15,8 @@ services:
         # true adds Node.js and the Claude Code CLI for COMMENTARY=claude (rebuild after changing)
         INSTALL_CLAUDE: ${INSTALL_CLAUDE:-false}
     image: huat-bot:latest
+    # Dockge Start/Update rebuilds from the code on disk instead of reusing the old image
+    pull_policy: build
     container_name: huat-bot
     restart: unless-stopped
     # tini as PID 1: forwards stop signals and reaps child processes (claude -p)

@@ -5,7 +5,8 @@ formatted for the user, and its reply is only accepted if every number in it app
 figures (``validate_commentary``). Any failure (command missing, timeout, invented number,
 empty reply) means no commentary, never a failed run.
 
-Environment: COMMENTARY ("off" by default, or "claude") and CLAUDE_BIN (default "claude").
+Environment: COMMENTARY ("off" by default, or "claude"), CLAUDE_BIN (default "claude") and
+CLAUDE_MODEL (default "haiku": a cheap model is plenty for a 60 word comment).
 """
 from __future__ import annotations
 
@@ -46,7 +47,13 @@ Rules:
 
 Figures (JSON):
 {figures}
+{memory}"""
+
+MEMORY_TEMPLATE = """
+What you already did (the bot's activity log, newest first). Do not repeat an earlier comment word for word:
+{memory}
 """
+DEFAULT_MODEL = "haiku"
 
 
 # Figures
@@ -370,11 +377,13 @@ def validate_commentary(text: str, figures: dict) -> str | None:
 # Running claude
 
 
-def build_prompt(figures: dict) -> str:
-    """The prompt sent to ``claude -p``: the rules plus the figures as JSON."""
+def build_prompt(figures: dict, memory: str = "") -> str:
+    """The prompt sent to ``claude -p``: the rules, the figures as JSON and, when given, a capped
+    excerpt of the vault activity log as memory."""
     return PROMPT_TEMPLATE.format(
         max_words=MAX_WORDS,
         figures=json.dumps(figures, indent=2, ensure_ascii=False, default=str),
+        memory=MEMORY_TEMPLATE.format(memory=memory.strip()) if memory and memory.strip() else "",
     )
 
 
@@ -394,6 +403,7 @@ def build_commentary(
     mode: str | None = None,
     runner: Callable[..., Any] = subprocess.run,
     timeout: float = DEFAULT_TIMEOUT,
+    memory: str = "",
 ) -> str | None:
     """Commentary text, or None when it is off or anything goes wrong (the reason is logged).
 
@@ -412,9 +422,11 @@ def build_commentary(
         return None
 
     claude_bin = (os.environ.get("CLAUDE_BIN") or "").strip() or "claude"
-    prompt = build_prompt(figures)
+    prompt = build_prompt(figures, memory)
+    model = (os.environ.get("CLAUDE_MODEL") or "").strip() or DEFAULT_MODEL
+    cmd = [claude_bin, "-p", prompt, "--model", model, "--no-session-persistence"]
     try:
-        proc = runner([claude_bin, "-p", prompt], capture_output=True, text=True, timeout=timeout)
+        proc = runner(cmd, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
         log.warning("Commentary skipped: %s took longer than %s seconds", claude_bin, timeout)
         return None

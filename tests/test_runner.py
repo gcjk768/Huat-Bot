@@ -152,10 +152,9 @@ def log_rows(vault: Vault, when: datetime = NOW) -> list[tuple[str, str]]:
     text = vault.read_text(log_note_path(when)) or ""
     rows = []
     for line in text.splitlines():
-        if not line.startswith("| ") or line.startswith("| Time") or line.startswith("| ---"):
-            continue
-        cells = [c.strip() for c in line.strip().strip("|").split(" | ")]
-        rows.append((cells[1], cells[2]))
+        m = re.match(r"^- \d\d:\d\d \S+ \*\*(.+?)\*\* · (.*)$", line)
+        if m:
+            rows.append((m.group(1), m.group(2)))
     return rows
 
 
@@ -219,22 +218,22 @@ def test_first_run_dry_run_end_to_end(first_run, toto):
         assert not contains_dash(m)
         assert len(m) <= C.TELEGRAM_MAX_CHARS
     m1, m2 = result.messages
-    assert m1.startswith("<b>WINNER! Your tickets won $10 in this run</b>\n1 winning ticket, details below.")
-    assert f"<b>TOTO draw {TOTO_LAST_DRAW}</b>, Thu 1 Oct 2026" in m1
-    assert "<b>My tickets</b>" in m1 and "Group 7 x1, won <b>$10</b>" in m1
+    assert m1.startswith("🎉 <b>WINNER</b> · your tickets won $10\n1 winning ticket, details below.")
+    assert f"<b>TOTO RESULT</b> · Draw {TOTO_LAST_DRAW}, Thu 1 Oct 2026" in m1
+    assert "<b>MY TICKETS</b>" in m1 and "Group 7 x1, won <b>$10</b>" in m1
     assert "2 lines in Tickets.md could not be read, see Ledger.md." in m1
     assert "Next TOTO draw" not in m1
 
-    assert m2.startswith(f"<b>Next TOTO draw</b> (draw {TOTO_LAST_DRAW + 1}): Mon 5 Oct 2026, 6.30pm")
-    assert f"Estimated jackpot: <b>{NEXT_JACKPOT}</b>" in m2
-    assert "Draw type: <b>Cascade draw</b>" in m2
-    assert "Jackpot rollovers so far: 3 of 3, this is the cascade draw" in m2
-    assert "Chance somebody wins Group 1 at this draw: <b>" in m2
-    assert "Buy signal: <b>HIGH</b>" in m2
-    assert "Return per $1: <b>$1.01</b> on average" in m2
+    assert m2.startswith(f"🔮 <b>NEXT TOTO DRAW</b> · Mon 5 Oct 2026, 6.30pm, draw {TOTO_LAST_DRAW + 1}")
+    assert f"<b>Jackpot {NEXT_JACKPOT}</b>" in m2
+    assert "<b>Cascade draw</b>" in m2
+    assert "rollovers 3 of 3, this is the cascade draw" in m2
+    assert "Somebody wins Group 1: <b>" in m2
+    assert "Buy signal <b>HIGH</b>" in m2
+    assert "<b>$1.01</b> back per $1 on average" in m2
     assert "Cascaded jackpot" in m2  # the return breakdown
     assert "Sales estimate: about " in m2
-    assert "<b>Next big prize</b>" in m2
+    assert "<b>NEXT BIG PRIZE</b>" in m2
     assert (f"The next draw is the cascade draw: about {NEXT_JACKPOT}. If nobody wins it, the jackpot goes to "
             "the Group 2 winners.") in m2
     assert f"Over {N_DRAWS} stored draws Group 1 was won in " in m2
@@ -255,20 +254,20 @@ def test_first_run_dry_run_end_to_end(first_run, toto):
     assert set(pending["draw_date"]) == {"2026-10-05"}
 
     # notes: dashboard, ledger, report and draw notes; nothing for 4D or suggestions
-    for rel in ("Dashboard.md", "Ledger.md", "Reports/2026-10-01 1945 Report.md",
+    for rel in ("Home.md", "Ledger.md", "Reports/2026/10/2026-10-01 1945 Report.md",
                 f"Draws/TOTO/2026-10-01 TOTO {TOTO_LAST_DRAW}.md", "Settings.md", "Tickets.md"):
         assert vault.exists(rel), rel
     assert len(list(vault.path("Draws/TOTO").glob("*.md"))) == 5  # draw_notes_backfill
     assert not vault.base.joinpath("Suggestions").exists()
     assert not vault.base.joinpath("Draws", "4D").exists()
-    assert sorted(p.name for p in vault.data_dir.iterdir()) == ["ledger.csv", "prize_rules.json", "state.json",
-                                                                 "toto.csv"]
-    assert result.report_path == str(vault.path("Reports/2026-10-01 1945 Report.md"))
-    report_text = vault.read_text("Reports/2026-10-01 1945 Report.md")
+    assert sorted(p.name for p in vault.data_dir.iterdir()) == ["last_messages.json", "ledger.csv",
+                                                                 "prize_rules.json", "state.json", "toto.csv"]
+    assert result.report_path == str(vault.path("Reports/2026/10/2026-10-01 1945 Report.md"))
+    report_text = vault.read_text("Reports/2026/10/2026-10-01 1945 Report.md")
     positions = [report_text.index(h) for h in SECTION_HEADINGS]
     assert positions == sorted(positions)
     assert "### The next big prize" in report_text
-    dashboard = vault.read_text("Dashboard.md")
+    dashboard = vault.read_text("Home.md")
     assert "## The next big prize" in dashboard and "Checked in this run: 2 tickets, won $10." in dashboard
 
     # state.json
@@ -382,7 +381,7 @@ def test_new_draw_is_fetched_alone_and_posted(seeded, toto, tg):
     assert len(load_toto(vault.toto_csv)) == N_DRAWS + 1
     assert len(tg.sent) == sent_before + 2
     m1, m2 = result.messages
-    assert f"<b>TOTO draw {TOTO_LAST_DRAW + 1}</b>, Mon 5 Oct 2026 (Cascade draw)" in m1
+    assert f"<b>TOTO RESULT</b> · Draw {TOTO_LAST_DRAW + 1}, Mon 5 Oct 2026, Cascade draw" in m1
     assert vault.load_state()["last_posted"] == {"toto": TOTO_LAST_DRAW + 1}
     assert vault.exists(f"Draws/TOTO/2026-10-05 TOTO {TOTO_LAST_DRAW + 1}.md")
     # the tickets bought for Monday's draw are checked now
@@ -394,14 +393,14 @@ def test_new_draw_is_fetched_alone_and_posted(seeded, toto, tg):
     assert ("NEW DRAW", new_draw_row(bigger, TOTO_LAST_DRAW + 1)) in rows
 
     # the cascade paid out, so the jackpot starts again: four draws to the next cascade
-    assert m2.startswith(f"<b>Next TOTO draw</b> (draw {TOTO_LAST_DRAW + 2}): Thu 8 Oct 2026, 6.30pm")
-    assert "Estimated jackpot: <b>$1,000,000</b>" in m2
-    assert "Draw type: Normal" in m2
-    assert "Jackpot rollovers so far: 0 of 3, then it cascades" in m2
-    assert "Buy signal: <b>LOW</b>" in m2
+    assert m2.startswith(f"🔮 <b>NEXT TOTO DRAW</b> · Thu 8 Oct 2026, 6.30pm, draw {TOTO_LAST_DRAW + 2}")
+    assert "<b>Jackpot $1,000,000</b>" in m2
+    assert "Normal draw · " in m2
+    assert "rollovers 0 of 3, then it cascades" in m2
+    assert "Buy signal <b>LOW</b>" in m2
     assert ("If nobody wins Group 1 first, the jackpot snowballs to about $3,714,000 at the cascade draw on "
             "Mon 19 Oct 2026") in m2
-    table = re.search(r"<b>Next big prize</b>.*?<pre>(.*?)</pre>", m2, re.S).group(1).splitlines()
+    table = re.search(r"<b>NEXT BIG PRIZE</b>.*?<pre>(.*?)</pre>", m2, re.S).group(1).splitlines()
     assert table[0].split() == ["Draw", "Jackpot", "Unwon", "Won"]
     assert [" ".join(line.split()[:3]) for line in table[1:]] == ["Thu 8 Oct", "Mon 12 Oct", "Thu 15 Oct",
                                                                     "Mon 19 Oct"]
@@ -451,7 +450,7 @@ def test_site_down_uses_the_stored_data(seeded, no_send):
     assert len(load_toto(vault.toto_csv)) == N_DRAWS
     # the next draw falls back to what state.json remembered
     assert "Mon 5 Oct 2026" in result.messages[1]
-    assert f"Estimated jackpot: <b>{NEXT_JACKPOT}</b>" in result.messages[1]
+    assert f"<b>Jackpot {NEXT_JACKPOT}</b>" in result.messages[1]
     assert vault.load_state()["next_draws"]["toto"]["draw_datetime"] == "2026-10-05T18:30:00+08:00"
 
 
@@ -473,7 +472,7 @@ def test_site_down_and_nothing_stored_notifies_and_fails(tmp_path, toto, tg):
     assert any(e == "ERROR" and "could not run" in d for e, d in rows)
     state = vault.load_state()
     assert state["last_run"]["ok"] is False and state["last_run"]["new_draws"] == 0
-    assert not vault.exists("Dashboard.md")
+    assert not vault.exists("Home.md")
 
 
 def test_site_down_and_nothing_stored_in_a_dry_run_only_prints(tmp_path, toto, no_send):
@@ -686,8 +685,8 @@ def test_demo_run_uses_synthetic_data_and_never_posts(tmp_path, monkeypatch, tg)
     assert settled["result"].tolist() == ["No prize", "Group 7 x1"]
     assert settled["winnings"].tolist() == [0.0, 10.0]
     assert (ledger["status"] == "pending").sum() == 1
-    assert result.messages[0].startswith("<b>WINNER! Your tickets won $10 in this run</b>")
-    assert "<b>Next big prize</b>" in result.messages[1]
+    assert result.messages[0].startswith("🎉 <b>WINNER</b> · your tickets won $10")
+    assert "<b>NEXT BIG PRIZE</b>" in result.messages[1]
     assert result.warnings[0] == runner.DEMO_WARNING
     state = vault.load_state()
     assert "last_posted" not in state and state["last_run"]["demo"] is True
@@ -697,7 +696,7 @@ def test_demo_run_uses_synthetic_data_and_never_posts(tmp_path, monkeypatch, tg)
     assert ("FETCH", "Demo run: synthetic history from huatbot.synth, the site was not contacted (600 TOTO "
                      "draws)") in rows
     assert ("NOTE", "Created [[Tickets]] with demo tickets") in rows
-    assert vault.exists("Dashboard.md")
+    assert vault.exists("Home.md")
 
     # a second demo run regenerates the same history: nothing new
     again = runner.run(demo=True, vault=demo_root, now=NOW + timedelta(minutes=5), out=lambda s: None)
@@ -709,7 +708,7 @@ def test_demo_default_vault_folder(tmp_path, monkeypatch, no_send):
     monkeypatch.chdir(tmp_path)
     result = runner.run(demo=True, now=NOW, out=lambda s: None)
     assert result.ok
-    assert (tmp_path / "demo-vault" / "Huat Bot" / "Dashboard.md").is_file()
+    assert (tmp_path / "demo-vault" / "Huat Bot" / "Home.md").is_file()
 
 
 def test_demo_history_ends_on_the_latest_draw_days():
@@ -844,7 +843,7 @@ def test_announced_special_draws_reach_the_outlook_and_message_2(seeded, toto, n
     assert result.ok
     m2 = result.messages[1]
     assert "Announced special draws: Fri 9 Oct 2026 (Hongbao)." in m2
-    assert "Draw type: <b>Hongbao draw</b>" in m2
+    assert "<b>Hongbao draw</b>" in m2
     assert "The next draw is a Hongbao draw with a jackpot of about $12,000,000." in m2
     assert vault.load_state()["upcoming_draws"]["toto"] == ["2026-10-05", "2026-10-09"]
 
@@ -1060,7 +1059,7 @@ def test_fetch_data_stores_the_draws_and_the_next_draw(tmp_path, toto):
     assert len(load_toto(vault.toto_csv)) == N_DRAWS
     state = vault.load_state()
     assert state["next_draws"]["toto"]["draw_type"] == "cascade"
-    assert not vault.exists("Dashboard.md")  # fetch does not analyse or write notes
+    assert not vault.exists("Home.md")  # fetch does not analyse or write notes
     rows = log_rows(vault)
     assert ("RUN", "Fetch started") in rows
     assert ("FETCH", f"Next draw: TOTO Mon 5 Oct 2026, 6.30pm, estimated jackpot {NEXT_JACKPOT}, Cascade draw") in rows
@@ -1123,7 +1122,7 @@ def test_analysis_failures_and_commentary_failures_get_error_rows(seeded, toto, 
         raise ValueError("bad row")
     monkeypatch.setattr(outlook, "jackpot_history", broken)
     monkeypatch.setenv("COMMENTARY", "claude")
-    monkeypatch.setattr(commentary, "build_commentary", lambda figures: None)
+    monkeypatch.setattr(commentary, "build_commentary", lambda figures, **kw: None)
     result = runner.run(dry_run=True, vault=seeded, fetcher=fake_site(toto), now=NOW, out=lambda s: None)
     assert result.ok
     assert "The jackpot history could not be worked out in this run (ValueError)." in result.warnings
@@ -1219,7 +1218,7 @@ def test_tickets_checked_before_a_failed_post_are_posted_on_the_retry(seeded, to
     assert "No tickets were checked in this run" not in message1
     assert message1.count("Mon 5 Oct 2026, 3 11 19 27 38 45") == 2  # the Ordinary and the System 7 ticket
     assert "unposted_settled" not in vault.load_state()
-    assert "Checked in this run: 2 tickets" in vault.read_text("Dashboard.md")
+    assert "Checked in this run: 2 tickets" in vault.read_text("Home.md")
 
     # Once posted, they are not listed again.
     later = runner.run(vault=vault, fetcher=fake_site(bigger), now=MONDAY + timedelta(minutes=20),
@@ -1245,7 +1244,7 @@ def test_next_draw_page_not_updated_yet_is_warned_about(seeded, toto, no_send):
     assert not any("may be out of date" in w for w in result.warnings)
     expected = outlook.estimate_next_jackpot(load_toto(seeded.toto_csv), PrizeRules())
     m2 = result.messages[1]
-    assert f"Estimated jackpot: <b>${expected:,.0f}</b>" in m2
+    assert f"<b>Jackpot ${expected:,.0f}</b>" in m2
     assert "$1,000,000" not in m2
     signal = [d for e, d in log_rows(seeded) if e == "SIGNAL"]
     assert signal[-1].startswith(f"Buy signal HIGH for TOTO draw: jackpot ${expected:,.0f}, cascade draw")
@@ -1348,7 +1347,7 @@ def test_commentary_dropped_for_restating_the_odds_is_not_logged_as_added(seeded
     from huatbot import commentary
     monkeypatch.setenv("COMMENTARY", "claude")
     monkeypatch.setattr(commentary, "build_commentary",
-                        lambda figures: "Nothing here beats the odds, every draw is independent.")
+                        lambda figures, **kw: "Nothing here beats the odds, every draw is independent.")
     result = runner.run(dry_run=True, vault=seeded, fetcher=fake_site(toto), now=NOW, out=lambda s: None)
     assert result.ok
     rows = log_rows(seeded)
@@ -1361,7 +1360,7 @@ def test_commentary_logged_as_added_is_the_text_that_is_shown(seeded, toto, monk
     from huatbot import commentary
     seen: list[dict] = []
 
-    def fake_commentary(figures):
+    def fake_commentary(figures, **kw):
         seen.append(figures)
         return "Every draw is independent. The jackpot has rolled over three times in a row."
     monkeypatch.setenv("COMMENTARY", "claude")
@@ -1370,7 +1369,7 @@ def test_commentary_logged_as_added_is_the_text_that_is_shown(seeded, toto, monk
     rows = log_rows(seeded)
     assert ("NOTE", "Added a short commentary written from the computed figures") in rows
     assert not any(e == "ERROR" and "Commentary" in d for e, d in rows)
-    assert "<i>The jackpot has rolled over three times in a row.</i>" in result.messages[1]
+    assert "💬 The jackpot has rolled over three times in a row.</blockquote>" in result.messages[1]
     assert "rolled over" not in result.messages[0]
     assert ("*Commentary:* The jackpot has rolled over three times in a row." in
             Path(result.report_path).read_text(encoding="utf-8"))
@@ -1456,14 +1455,14 @@ def test_retry_after_a_failed_post_keeps_one_report_note(seeded, toto, tg):
     tg.fail = True
     first = runner.run(vault=vault, fetcher=fake_site(toto), now=NOW + timedelta(minutes=30), out=lambda s: None)
     assert not first.ok and first.report_path
-    reports = sorted(p.name for p in vault.path("Reports").glob("*.md"))
+    reports = sorted(p.name for p in vault.path("Reports").rglob("*.md"))
     tg.fail = False
     again = runner.run(vault=vault, fetcher=fake_site(toto), now=NOW + timedelta(minutes=40), out=lambda s: None)
     assert again.ok and again.posted
-    assert sorted(p.name for p in vault.path("Reports").glob("*.md")) == reports
+    assert sorted(p.name for p in vault.path("Reports").rglob("*.md")) == reports
     assert again.report_path == first.report_path
     report_name = again.report_path.rsplit("/", 1)[-1].removesuffix(".md")
-    assert f"Newest report: [[{report_name}]]" in vault.read_text("Dashboard.md")
+    assert f"Newest report: [[{report_name}]]" in vault.read_text("Home.md")
     assert any(e == "RUN" and f"report [[{report_name}]]" in d for e, d in log_rows(vault))
 
 
@@ -1491,7 +1490,7 @@ def test_no_user_facing_text_mentions_a_removed_feature(first_run, seeded, toto,
     for path in sorted(vault.base.rglob("*.md")):
         if path.name != "Tickets.md":  # the user's own note (it holds a 4D line on purpose)
             texts[str(path.relative_to(vault.base))] = path.read_text(encoding="utf-8")
-    assert {"Dashboard.md", "Ledger.md", "Reports/2026-10-01 1945 Report.md", "Logs/2026-10 Activity.md",
+    assert {"Home.md", "Ledger.md", "Reports/2026/10/2026-10-01 1945 Report.md", "Activity/2026/10/2026-10-01.md",
             "Settings.md", f"Draws/TOTO/2026-10-01 TOTO {TOTO_LAST_DRAW}.md"} <= set(texts)
     texts["Tickets template"] = tickets.TICKETS_TEMPLATE
     texts["Settings template"] = runner.SETTINGS_TEMPLATE
@@ -1502,7 +1501,7 @@ def test_no_user_facing_text_mentions_a_removed_feature(first_run, seeded, toto,
     assert monday.posted
     for i, sent in enumerate(tg.sent, 1):
         texts[f"posted {i}"] = sent["text"]
-    texts["Monday dashboard"] = seeded.read_text("Dashboard.md")
+    texts["Monday dashboard"] = seeded.read_text("Home.md")
     texts["Monday report"] = Path(monday.report_path).read_text(encoding="utf-8")
     texts["Monday log"] = seeded.read_text(log_note_path(MONDAY))
 
@@ -1511,7 +1510,7 @@ def test_no_user_facing_text_mentions_a_removed_feature(first_run, seeded, toto,
     printed_demo: list[str] = []
     runner.run(demo=True, vault=demo, now=NOW, out=printed_demo.append)
     texts["demo printed"] = "\n".join(printed_demo)
-    texts["demo dashboard"] = Vault(demo).read_text("Dashboard.md")
+    texts["demo dashboard"] = Vault(demo).read_text("Home.md")
     texts["demo tickets"] = Vault(demo).read_text("Tickets.md")
 
     problems = [p for name, text in texts.items() for p in _user_text_problems(name, text or "")]
@@ -1520,7 +1519,7 @@ def test_no_user_facing_text_mentions_a_removed_feature(first_run, seeded, toto,
     for name, text in texts.items():
         if name.startswith(("message", "posted")):
             assert not contains_dash(text), name
-        elif name.endswith(".md") and not name.startswith("Logs/"):
+        elif name.endswith(".md") and not name.startswith("Activity/"):
             assert not has_prose_dashes(text), name
 
 

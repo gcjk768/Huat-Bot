@@ -70,6 +70,7 @@ import pandas as pd
 from . import (
     buysignal,
     commentary,
+    listener,
     notes,
     outlook,
     prize_rules,
@@ -885,7 +886,8 @@ def _commentary(ctx: Context, demo: bool, activity: _Activity | None = None) -> 
     if demo:
         return None  # a demo never calls out to claude
     try:
-        text = commentary.build_commentary(_commentary_figures(ctx))
+        memory = activity.vault.recent_activity(ctx.now) if activity is not None else ""
+        text = commentary.build_commentary(_commentary_figures(ctx), memory=memory)
         reason = "the container log says why"
     except Exception as exc:  # optional extra, never fatal
         log.warning("Commentary skipped: %s", exc)
@@ -961,7 +963,8 @@ def _deliver(messages: list[str], ctx: Context, state: dict, *, dry_run: bool, p
 
     try:
         if done < len(messages):
-            telegram.post_messages(messages[done:], token, chat_id, dry_run=False, out=out, on_sent=sent)
+            telegram.post_messages(messages[done:], token, chat_id, dry_run=False, out=out, on_sent=sent,
+                                   reply_markup=listener.BUTTONS)
     except Exception as exc:
         log.exception("Posting to Telegram failed")
         msg = f"Posting to Telegram failed: {_error_text(exc)}"
@@ -1167,6 +1170,8 @@ def run(*, dry_run: bool = False, fetch: bool = True, post: bool = True, demo: b
         result.report_path = str(vault.path(notes.report_rel(vault, ctx, report_md)))
         messages = report.telegram_messages(ctx)
         result.messages = messages
+        if not demo:
+            listener.save_last_messages(vault, messages)
 
         # 6 telegram
         posted, ok = _deliver(messages, ctx, state, dry_run=dry_run, post=post, force_post=force_post,

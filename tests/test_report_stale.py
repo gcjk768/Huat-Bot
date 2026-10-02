@@ -69,7 +69,7 @@ def _history_to(day: date, last_draw: int):
 
 
 def _activity(vault_path) -> str:
-    logs = sorted((vault_path / "Huat Bot").rglob("* Activity.md"))
+    logs = sorted((vault_path / "Huat Bot").glob("Activity/**/*.md"))
     return "\n".join(p.read_text(encoding="utf-8") for p in logs)
 
 
@@ -86,15 +86,15 @@ def test_next_draw_page_still_showing_the_draw_just_held(vault_path):
     result = _run(vault_path, fake_site(history, next_toto=held), _at(2026, 10, 1))
     msg2 = result.messages[1]
     assert "$5,000,000" not in msg2
-    assert msg2.startswith("<b>Next TOTO draw</b>: Mon 5 Oct 2026, 6.30pm (regular schedule, not announced yet)\n")
+    assert msg2.startswith("🔮 <b>NEXT TOTO DRAW</b> · Mon 5 Oct 2026, 6.30pm (regular schedule, not announced yet)\n")
     expected = outlook.estimate_next_jackpot(history, PrizeRules())
-    assert f"Estimated jackpot: <b>{money(expected)}</b> <i>(worked out from past results)</i>" in msg2
-    assert "Buy signal: <b>" in msg2 and "<b>Next big prize</b>" in msg2
+    assert f"<b>Jackpot {money(expected)}</b> <i>(worked out from past results)</i>" in msg2
+    assert "Buy signal <b>" in msg2 and "<b>NEXT BIG PRIZE</b>" in msg2
     assert any("still shows the draw on Thu 1 Oct 2026" in w for w in result.warnings)
-    report_text = (vault_path / "Huat Bot" / "Reports" / "2026-10-01 1945 Report.md").read_text(encoding="utf-8")
+    report_text = (vault_path / "Huat Bot" / "Reports" / "2026" / "10" / "2026-10-01 1945 Report.md").read_text(encoding="utf-8")
     assert "$5,000,000" not in report_text
     assert "still shows the draw on Thu 1 Oct 2026" in report_text
-    assert "$5,000,000" not in _notes(vault_path)["Dashboard.md"]
+    assert "$5,000,000" not in _notes(vault_path)["Home.md"]
 
 
 def test_site_unreachable_for_a_week(vault_path):
@@ -108,11 +108,11 @@ def test_site_unreachable_for_a_week(vault_path):
             "since.") in msg1
     for past in ("Mon 5 Oct", "Thu 8 Oct", "Thu 1 Oct 2026, 6.30pm"):
         assert past not in msg2, past
-    assert msg2.startswith("<b>Next TOTO draw</b>: Mon 12 Oct 2026, 6.30pm (worked out from the regular schedule, "
+    assert msg2.startswith("🔮 <b>NEXT TOTO DRAW</b> · Mon 12 Oct 2026, 6.30pm (worked out from the regular schedule, "
                            "results are not up to date)\n")
     assert "(draw " not in msg2.split("\n", 1)[0]
     assert "<i>(worked out from past results)</i>" in msg2  # the stored Mon 5 Oct jackpot is not used
-    assert "Mon 12 Oct" in msg2[msg2.index("<b>Next big prize</b>"):]
+    assert "Mon 12 Oct" in msg2[msg2.index("<b>NEXT BIG PRIZE</b>"):]
 
 
 def test_draw_held_earlier_today_with_its_result_not_out(vault_path):
@@ -122,10 +122,10 @@ def test_draw_held_earlier_today_with_its_result_not_out(vault_path):
     result = _run(vault_path, fake_site(toto_history(N_DRAWS), next_toto=nt), _at(2026, 10, 5, 21, 0))
     msg1, msg2 = result.messages
     assert "<i>TOTO draw 4124 was held at 6.30pm today, result not out yet.</i>" in msg1
-    assert msg2.startswith("<b>Next TOTO draw</b> (draw 4124): Mon 5 Oct 2026, 6.30pm (draw held, result not out "
-                           "yet)\n")
+    assert msg2.startswith("🔮 <b>NEXT TOTO DRAW</b> · Mon 5 Oct 2026, 6.30pm (draw held, result not out "
+                           "yet), draw 4124\n")
     assert "Its sales are closed, so there is no buy signal for it." in msg2
-    assert "Buy signal" not in msg2 and "Return per $1" not in msg2
+    assert "Buy signal" not in msg2 and "back per $1" not in msg2
     activity = _activity(vault_path)
     assert "SIGNAL" not in activity  # sales are closed: no buy signal row either
     assert "Next draw: TOTO Mon 5 Oct 2026, 6.30pm, estimated jackpot $2,400,000" in activity
@@ -144,10 +144,10 @@ def test_site_with_a_newer_draw_that_could_not_be_read(vault_path):
     assert any("does not match the latest draw on the site (4124)" in w for w in result.warnings)
     msg1, msg2 = result.messages
     assert "Results not up to date: the newest stored result is draw 4123" in msg1
-    assert "<b>TOTO draw 4123</b>" in msg1
-    assert msg2.startswith("<b>Next TOTO draw</b>: Thu 8 Oct 2026, 6.30pm (results are not up to date)\n")
+    assert "<b>TOTO RESULT</b> · Draw 4123" in msg1
+    assert msg2.startswith("🔮 <b>NEXT TOTO DRAW</b> · Thu 8 Oct 2026, 6.30pm (results are not up to date)\n")
     assert "4124" not in msg2 and "4125" not in msg2
-    assert "Estimated jackpot: <b>$1,500,000</b>\n" in msg2  # the page jackpot is for that draw
+    assert "<b>Jackpot $1,500,000</b>" in msg2  # the page jackpot is for that draw
 
 
 def test_moved_hongbao_draw_keeps_its_number(vault_path):
@@ -159,10 +159,10 @@ def test_moved_hongbao_draw_keeps_its_number(vault_path):
     result = _run(vault_path, fake_site(history, next_toto=nt), _at(2026, 10, 5))
     msg1, msg2 = result.messages
     assert "not up to date" not in msg1 and "not up to date" not in msg2
-    assert "<b>TOTO draw 4124</b>, Mon 5 Oct 2026" in msg1
-    assert msg2.startswith("<b>Next TOTO draw</b> (draw 4125): Fri 9 Oct 2026, 9.30pm\n")
-    assert "Estimated jackpot: <b>$6,000,000</b>\n" in msg2
-    assert "Draw type: <b>Hongbao draw</b>" in msg2
+    assert "<b>TOTO RESULT</b> · Draw 4124, Mon 5 Oct 2026" in msg1
+    assert msg2.startswith("🔮 <b>NEXT TOTO DRAW</b> · Fri 9 Oct 2026, 9.30pm, draw 4125\n")
+    assert "<b>Jackpot $6,000,000</b>" in msg2
+    assert "<b>Hongbao draw</b>" in msg2
     assert "The next draw is a Hongbao draw with a jackpot of about $6,000,000." in msg2
     assert "Announced special draws: Fri 9 Oct 2026 (Hongbao)." in msg2
 
@@ -206,7 +206,7 @@ def test_guard_no_removed_feature_anywhere_in_the_vault(vault_path):
     # draw notes and the activity log) and both messages are checked.
     result = _run(vault_path, fake_site(toto_history(N_DRAWS)), _at(2026, 10, 1))
     written = _notes(vault_path)
-    assert {"Settings.md", "Tickets.md", "Dashboard.md", "Ledger.md"} <= set(written)
+    assert {"Settings.md", "Tickets.md", "Home.md", "Ledger.md"} <= set(written)
     assert any(rel.startswith("Reports/") for rel in written)
     assert any(rel.startswith("Draws/TOTO/") for rel in written)
     assert not any("4D" in rel or "Suggestions" in rel for rel in written)

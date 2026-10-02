@@ -7,11 +7,11 @@ Layout inside the vault (``root``), everything under one bot folder (``base``)::
       Huat Bot/                  base (VAULT_FOLDER)
         Settings.md              read: the jackpot alert and options as note properties
         Tickets.md               read: the user's tickets
-        Dashboard.md, Ledger.md  written every run
+        Home.md, Ledger.md       written every run (Home is the map of content)
         Data/                    toto.csv, ledger.csv, state.json, prize_rules.json
         Draws/TOTO               one note per draw
-        Reports/                 one note per run
-        Logs/YYYY-MM Activity.md every fetch, note, post and error
+        Reports/YYYY/MM/         one note per run
+        Activity/YYYY/MM/YYYY-MM-DD.md  every fetch, note, post and error
 
 Obsidian (or Obsidian Sync, Syncthing, SMB clients) may be watching the same folder
 from phones and PCs, so this module is careful:
@@ -33,7 +33,7 @@ import math
 import os
 import re
 import threading
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path, PureWindowsPath
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -51,7 +51,7 @@ SG = ZoneInfo(C.SG_TZ_NAME)
 DEFAULT_VAULT_PATH = "./vault"
 DEFAULT_FOLDER = "Huat Bot"
 DATA_FOLDER = "Data"
-LOG_FOLDER = "Logs"
+LOG_FOLDER = "Activity"
 # Folders created inside the bot folder by ensure_layout (Data is created separately because
 # DATA_DIR may point somewhere else).
 LAYOUT_FOLDERS = ("Draws/TOTO", "Reports", LOG_FOLDER)
@@ -59,8 +59,12 @@ LAYOUT_FOLDERS = ("Draws/TOTO", "Reports", LOG_FOLDER)
 # state.json keys that must hold an object with one entry per game.
 _STATE_OBJECT_KEYS = ("next_draws", "last_posted", "skip", "fetch_failures", "upcoming_draws")
 
-LOG_TABLE_HEADER = "| Time | Event | Details |"
-LOG_TABLE_RULE = "| --- | --- | --- |"
+# Activity log line emoji per event (anything else gets the bullet).
+LOG_EMOJI = {
+    "RUN": "▶️", "SETTINGS": "⚙️", "FETCH": "📥", "NEW DRAW": "🎱", "TICKETS": "🎫", "LEDGER": "📒",
+    "SIGNAL": "📈", "NOTE": "📝", "POST": "📤", "DRY RUN": "🧪", "ERROR": "❌", "COMMAND": "💬",
+    "NOTICE": "📣", "SCHEDULE": "🗓", "WAIT": "⏳",
+}
 
 # Obsidian's own frontmatter fences. A closing "..." is valid YAML too, so accept it on read.
 _FRONTMATTER_RE = re.compile(r"\A---[ \t]*\n(.*?)^(?:---|\.\.\.)[ \t]*$\n?", re.S | re.M)
@@ -98,14 +102,14 @@ def fmt_log_time(when: datetime) -> str:
 
 
 def log_note_path(when: datetime) -> str:
-    """Relative path of the activity log for the month of ``when``: ``Logs/2026-10 Activity.md``."""
+    """Relative path of the activity log for the day of ``when``: ``Activity/2026/10/2026-10-02.md``."""
     t = to_sg(when)
-    return f"{LOG_FOLDER}/{t.year:04d}-{t.month:02d} Activity.md"
+    return f"{LOG_FOLDER}/{t:%Y}/{t:%m}/{t:%Y-%m-%d}.md"
 
 
 def _log_title(when: datetime) -> str:
     t = to_sg(when)
-    return f"# Huat Bot activity, {_MONTH_NAMES[t.month - 1]} {t.year}"
+    return f"# Huat Bot activity, {t.day} {_MONTH_NAMES[t.month - 1]} {t.year}"
 
 
 def _table_cell(value: Any) -> str:
@@ -454,33 +458,52 @@ class Vault:
     # Activity log
 
     def log(self, event: str, message: str, when: datetime | None = None) -> None:
-        """Append one row to ``Logs/YYYY-MM Activity.md``.
+        """Append one line to today's ``Activity/YYYY/MM/YYYY-MM-DD.md``.
 
-        Row example: ``| Fri 2 Oct 2026 7.30pm | FETCH | 2 new TOTO draws |``. The note is created
-        with a title and table header on first use each month. Pipes are escaped, newlines
-        flattened. Pass note paths as [[wikilinks]] so the row stays free of prose dashes.
-        Never raises: a failure is logged and the run carries on.
+        Line example: ``- 19:30 📥 **FETCH** · 2 new TOTO draws``. The note is created with
+        frontmatter and a title on first use each day; newlines are flattened. Pass note paths as
+        [[wikilinks]] so the line stays free of prose dashes. Never raises: a failure is logged
+        and the run carries on.
         """
         try:
             when = to_sg(when) if when is not None else datetime.now(SG)
-            row = f"| {fmt_log_time(when)} | {_table_cell(event).upper()} | {_table_cell(message)} |"
-            log.info("%s: %s", str(event).upper(), message)
+            name = _table_cell(event).upper()
+            # Not a table cell any more: a bare | keeps [[note|alias]] links working.
+            detail = _table_cell(message).replace("\\|", "|")
+            line = f"- {when:%H:%M} {LOG_EMOJI.get(name, '•')} **{name}** · {detail}"
+            log.info("%s: %s", name, message)
             with _LOG_LOCK:
                 target = self.path(log_note_path(when))
                 existing = self._read(target)
                 if existing is None or not existing.strip():
-                    text = f"{_log_title(when)}\n\n{LOG_TABLE_HEADER}\n{LOG_TABLE_RULE}\n{row}\n"
+                    head = render_note(_log_title(when), {"tags": ["huatbot", "activity"],
+                                                          "updated": when.date().isoformat()})
+                    text = head.rstrip("\n") + "\n\n" + line + "\n"
                 else:
-                    text = existing.replace("\r\n", "\n").rstrip("\n") + "\n"
-                    last_line = text.rstrip("\n").rsplit("\n", 1)[-1].strip()
-                    if not last_line.startswith("|"):
-                        # The user wrote below the table (or removed it): start a fresh table so
-                        # the new row still renders as part of one.
-                        text += f"\n{LOG_TABLE_HEADER}\n{LOG_TABLE_RULE}\n"
-                    text += row + "\n"
+                    text = existing.replace("\r\n", "\n").rstrip("\n") + "\n" + line + "\n"
                 self._write(target, text)
         except Exception as exc:  # the activity log must never stop a run
             log.warning("Could not write the activity log (%s: %s)", type(exc).__name__, exc)
+
+    def recent_activity(self, now: datetime | None = None, days: int = 7, limit: int = 4000) -> str:
+        """The newest activity lines of the last ``days`` days, newest first, capped at ``limit``
+        characters: the bot's memory of what it already did. Never raises."""
+        now = to_sg(now) if now is not None else datetime.now(SG)
+        lines: list[str] = []
+        try:
+            for back in range(days):
+                text = self._read(self.path(log_note_path(now - timedelta(days=back)))) or ""
+                day = [ln for ln in text.splitlines() if ln.startswith("- ")]
+                lines += [f"{(now - timedelta(days=back)):%Y-%m-%d} {ln[2:]}" for ln in reversed(day)]
+        except Exception as exc:
+            log.warning("Could not read the activity log (%s)", type(exc).__name__)
+        out, size = [], 0
+        for ln in lines:
+            if size + len(ln) + 1 > limit:
+                break
+            out.append(ln)
+            size += len(ln) + 1
+        return "\n".join(out)
 
     # Run state (next draw dates, skip lists, last posted ...)
 

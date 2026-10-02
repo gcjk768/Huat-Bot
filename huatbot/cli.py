@@ -33,7 +33,7 @@ from typing import Any
 
 import pandas as pd
 
-from . import __version__, runner, scheduler, telegram
+from . import __version__, listener, runner, scheduler, telegram
 from . import fetch as site
 from .http import Fetcher
 from .models import RunResult
@@ -191,6 +191,8 @@ def cmd_serve(args: argparse.Namespace, dry_run: bool) -> int:
     for w in config.warnings:
         print(f"Warning: {w}")
     print(f"Huat Bot scheduler started. {config.describe()}. Vault folder: {vault.base}")
+    if not quiet:
+        listener.start(vault)
     try:
         scheduler.serve(run_fn, check_fn, refresh_fn, notify_fn, vault.log,
                         lambda: datetime.now(SG), time.sleep, config, done_fn=done_fn)

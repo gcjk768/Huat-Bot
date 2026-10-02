@@ -26,7 +26,9 @@ from tests.ctxgen import cascade_next_toto, make_context, rebuilt, unknown_jackp
 
 SG = report.SG
 REPORT_NAME = "2026-10-01 1930 Report"
-LOG_NAME = "2026-10 Activity"
+REPORT_REL = f"Reports/2026/10/{REPORT_NAME}.md"
+LOG_NAME = "2026-10-01"
+LOG_REL = "Activity/2026/10/2026-10-01.md"
 DRAW_4123 = "Draws/TOTO/2026-10-01 TOTO 4123.md"
 DRAW_4122 = "Draws/TOTO/2026-09-28 TOTO 4122.md"
 DRAW_4123_LINK = "[[Draws/TOTO/2026-10-01 TOTO 4123|2026-10-01 TOTO 4123]]"
@@ -122,7 +124,7 @@ def test_toto_draw_note(ctx):
         "group1_prize": float(row["jackpot"]),
         "group1_winners": 0,
     }
-    assert body.startswith("# TOTO draw 4123, Thu 1 Oct 2026\n\nBack to [[Dashboard]].\n\n")
+    assert body.startswith("# TOTO draw 4123, Thu 1 Oct 2026\n\nBack to [[Home]].\n\n")
     assert (f"Winning numbers: **{toto_nums(toto_numbers(row))}**, additional number "
             f"**{int(row['additional'])}**.") in body
     assert f"Draw type: Normal. Group 1 prize: {money(row['jackpot'])}, no winner." in body
@@ -155,7 +157,7 @@ def test_toto_draw_note_accepts_a_dict_row(ctx):
 
 def test_dashboard_links_and_headings(ctx):
     rel, _, body = _check_note(notes.dashboard_note(ctx))
-    assert rel == "Dashboard.md"
+    assert rel == "Home.md"
     for name in (REPORT_NAME, "Ledger", "Tickets", "Settings", LOG_NAME):
         assert f"[[{name}]]" in body, name
     assert DRAW_4123_LINK in body
@@ -399,7 +401,7 @@ def test_ledger_note_lists_every_ticket_and_bad_line(ctx):
     # An old 4D line gets a clear reason instead of being skipped.
     assert bad[0].splitlines()[1].endswith("` 4D is not tracked any more, this bot follows TOTO only.")
     assert bad[1] == "Fix these lines in [[Tickets]] and they will be added on the next run."
-    assert "[[Dashboard]]" in body and "[[Tickets]]" in body
+    assert "[[Home]]" in body and "[[Tickets]]" in body
 
 
 def test_ledger_note_keeps_raw_lines_as_code(ctx):
@@ -450,7 +452,7 @@ def test_ledger_note_keeps_old_4d_rows(ctx):
 
 def test_report_note(ctx, report_md):
     rel, fm, body = _check_note(notes.report_note(ctx, report_md))
-    assert rel == f"Reports/{REPORT_NAME}.md"
+    assert rel == REPORT_REL
     assert fm == {
         "tags": ["huatbot", "report"],
         "date": "2026-10-01",
@@ -463,18 +465,18 @@ def test_report_note(ctx, report_md):
     }
     lines = body.splitlines()
     assert lines[0] == "# Huat Bot report, Thu 1 Oct 2026, 7.30pm"
-    assert lines[2] == f"Back to [[Dashboard]]. Activity log: [[{LOG_NAME}]]."
+    assert lines[2] == f"Back to [[Home]]. Activity log: [[{LOG_NAME}]]."
     assert "\n".join(lines[3:]).strip("\n") == "\n".join(report_md.strip("\n").split("\n")[1:]).strip("\n")
     assert [ln for ln in lines if ln.startswith("## ")] == list(report.SECTION_HEADINGS)
 
 
 def test_report_note_without_a_title_and_its_path(ctx):
     _, fm, body = notes.report_note(variant(ctx, new_draws=[]), "Plain text.")
-    assert body == f"Back to [[Dashboard]]. Activity log: [[{LOG_NAME}]].\n\nPlain text."
+    assert body == f"Back to [[Home]]. Activity log: [[{LOG_NAME}]].\n\nPlain text."
     assert fm["new_draws"] == 0
     # The note name is in Singapore time, whatever zone the run time is in.
     assert notes.report_note_path(datetime(2026, 10, 2, 11, 30, tzinfo=timezone.utc)) == \
-        "Reports/2026-10-02 1930 Report.md"
+        "Reports/2026/10/2026-10-02 1930 Report.md"
 
 
 # Writing to a vault
@@ -485,29 +487,29 @@ def _md_files(vault):
 
 
 def _log_rows(vault, event):
-    text = vault.read_text(f"Logs/{LOG_NAME}.md") or ""
-    return [ln for ln in text.splitlines() if f"| {event} |" in ln]
+    text = vault.read_text(LOG_REL) or ""
+    return [ln for ln in text.splitlines() if f"**{event}** · " in ln]
 
 
 def test_write_all_creates_notes_and_logs(tmp_path, ctx, report_md):
     vault = Vault(tmp_path / "vault")
     written = notes.write_all(vault, ctx, report_md)
     # Draw notes oldest first, then the report, the ledger and the dashboard.
-    assert written == [DRAW_4122, DRAW_4123, f"Reports/{REPORT_NAME}.md", "Ledger.md", "Dashboard.md"]
+    assert written == [DRAW_4122, DRAW_4123, REPORT_REL, "Ledger.md", "Home.md"]
     for rel in written:
         text = vault.read_text(rel)
         assert _yaml_block(text)["tags"][0] == "huatbot"
         assert vault.read_note(rel)[0]
     assert len(_log_rows(vault, "NOTE")) == len(written)
-    assert any("Created [[Dashboard]]" in row for row in _log_rows(vault, "NOTE"))
-    for path in _md_files(vault):  # notes and the activity log
-        assert not has_prose_dashes(path.read_text(encoding="utf-8")), path
+    assert any("Created [[Home]]" in row for row in _log_rows(vault, "NOTE"))
+    for path in _md_files(vault):  # notes and the activity log (its "- " list markers are not prose)
+        assert not has_prose_dashes(re.sub(r"(?m)^- ", "", path.read_text(encoding="utf-8"))), path
     # No suggestion notes, no 4D notes or data, nothing outside the bot folder.
     assert not vault.path("Suggestions").exists() and not vault.path("Draws/4D").exists()
     assert not (vault.data_dir / "fourd.csv").exists() and not (vault.data_dir / "backtest_cache.json").exists()
     assert {p.relative_to(vault.root).parts[0] for p in (tmp_path / "vault").rglob("*") if p.is_file()} == {"Huat Bot"}
     assert {p.relative_to(vault.base).parts[0] for p in _md_files(vault)} == {
-        "Dashboard.md", "Ledger.md", "Reports", "Draws", "Logs"}
+        "Home.md", "Ledger.md", "Reports", "Draws", "Activity"}
 
 
 def test_write_all_twice_changes_nothing(tmp_path, ctx, report_md):
@@ -528,8 +530,8 @@ def test_write_all_updates_changed_notes_only(tmp_path, ctx, report_md):
     notes.write_all(vault, ctx, report_md)
     later = variant(ctx, commentary="Second run.", new_draws=[])
     written = notes.write_all(vault, later, report.full_report(later))
-    assert written == [f"Reports/{REPORT_NAME}.md"]
-    assert any("Updated [[Reports/2026-10-01 1930 Report\\|2026-10-01 1930 Report]]" in row
+    assert written == [REPORT_REL]
+    assert any("Updated [[Reports/2026/10/2026-10-01 1930 Report|2026-10-01 1930 Report]]" in row
                for row in _log_rows(vault, "NOTE"))
 
 
@@ -547,9 +549,9 @@ def test_write_all_without_backfill_still_writes_the_newest_draw_note(tmp_path, 
     vault = Vault(tmp_path / "vault")
     written = notes.write_all(vault, variant(ctx, settings=Settings(draw_notes_backfill=0)), report_md)
     assert [p for p in written if p.startswith("Draws/")] == [DRAW_4123]
-    assert "Dashboard.md" in written
-    assert DRAW_4123_LINK.replace("|", "\\|") not in vault.read_text("Dashboard.md")  # not in a table
-    assert DRAW_4123_LINK in vault.read_text("Dashboard.md") and vault.exists(DRAW_4123)
+    assert "Home.md" in written
+    assert DRAW_4123_LINK.replace("|", "\\|") not in vault.read_text("Home.md")  # not in a table
+    assert DRAW_4123_LINK in vault.read_text("Home.md") and vault.exists(DRAW_4123)
 
 
 def test_write_all_logs_an_error_and_carries_on(tmp_path, ctx, report_md, monkeypatch):
@@ -563,7 +565,7 @@ def test_write_all_logs_an_error_and_carries_on(tmp_path, ctx, report_md, monkey
 
     monkeypatch.setattr(vault, "write_note", flaky)
     written = notes.write_all(vault, ctx, report_md)
-    assert "Ledger.md" not in written and "Dashboard.md" in written
+    assert "Ledger.md" not in written and "Home.md" in written
     errors = _log_rows(vault, "ERROR")
     assert len(errors) == 1 and "Could not write [[Ledger]] (PermissionError)" in errors[0]
 
@@ -589,9 +591,9 @@ def test_write_all_skips_notes_whose_only_change_is_the_time_stamp(tmp_path, ctx
     logged = len(_log_rows(vault, "NOTE"))
     written = notes.write_all(vault, later, report.full_report(later))
     # The report differs only in its time, so the 7.30pm report stays the newest one.
-    assert written == ["Dashboard.md"]
-    assert not vault.exists("Reports/2026-10-01 2030 Report.md")
-    assert f"Newest report: [[{REPORT_NAME}]]" in vault.read_text("Dashboard.md")
+    assert written == ["Home.md"]
+    assert not vault.exists("Reports/2026/10/2026-10-01 2030 Report.md")
+    assert f"Newest report: [[{REPORT_NAME}]]" in vault.read_text("Home.md")
     for rel, text in keep.items():
         assert vault.read_text(rel) == text, rel
     assert len(_log_rows(vault, "NOTE")) == logged + 1  # no "Updated [[Ledger]]" row
@@ -614,21 +616,21 @@ def test_rerun_with_the_same_report_keeps_the_earlier_report_note(tmp_path, ctx)
     again_md = report.full_report(again)
     written = notes.write_all(vault, again, again_md)
     assert not any(p.startswith("Reports/") for p in written)
-    assert sorted(p.name for p in vault.path("Reports").glob("*.md")) == [
+    assert sorted(p.name for p in vault.path("Reports").rglob("*.md")) == [
         f"{REPORT_NAME}.md", "2026-10-01 1940 Report.md"]
-    assert notes.report_rel(vault, again, again_md) == "Reports/2026-10-01 1940 Report.md"
-    assert "Newest report: [[2026-10-01 1940 Report]]" in vault.read_text("Dashboard.md")
+    assert notes.report_rel(vault, again, again_md) == "Reports/2026/10/2026-10-01 1940 Report.md"
+    assert "Newest report: [[2026-10-01 1940 Report]]" in vault.read_text("Home.md")
 
     # A report with different content is a new note, and the Dashboard links to it.
     changed = variant(again, commentary="Something new.")
     changed_md = report.full_report(changed)
-    assert "Reports/2026-10-01 1950 Report.md" in notes.write_all(vault, changed, changed_md)
-    assert notes.report_rel(vault, changed, changed_md) == "Reports/2026-10-01 1950 Report.md"
-    assert "Newest report: [[2026-10-01 1950 Report]]" in vault.read_text("Dashboard.md")
+    assert "Reports/2026/10/2026-10-01 1950 Report.md" in notes.write_all(vault, changed, changed_md)
+    assert notes.report_rel(vault, changed, changed_md) == "Reports/2026/10/2026-10-01 1950 Report.md"
+    assert "Newest report: [[2026-10-01 1950 Report]]" in vault.read_text("Home.md")
 
     # A report from another day is never reused.
     next_day = variant(again, now=ctx.now + pd.Timedelta(days=1))
-    assert "Reports/2026-10-02 1930 Report.md" in notes.write_all(vault, next_day, report.full_report(next_day))
+    assert "Reports/2026/10/2026-10-02 1930 Report.md" in notes.write_all(vault, next_day, report.full_report(next_day))
 
 
 def test_write_all_leaves_old_4d_and_suggestion_files_alone(tmp_path, ctx, report_md):
@@ -647,9 +649,9 @@ def test_write_all_leaves_old_4d_and_suggestion_files_alone(tmp_path, ctx, repor
     assert not any(p.startswith(("Suggestions/", "Draws/4D/", "Data/")) for p in written)
     for rel, text in old.items():
         assert vault.path(rel).read_text(encoding="utf-8") == text, rel
-    log_text = vault.read_text(f"Logs/{LOG_NAME}.md")
+    log_text = vault.read_text(LOG_REL)
     assert "Suggestions" not in log_text and "4D" not in log_text
-    assert "Suggestions/" not in vault.read_text("Dashboard.md")
+    assert "Suggestions/" not in vault.read_text("Home.md")
 
 
 WIKILINK = re.compile(r"\[\[([^\]|\\]+)(?:\\?\|[^\]]*)?\]\]")
@@ -667,9 +669,9 @@ def test_every_link_in_the_notes_leads_to_a_note(tmp_path, ctx):
                             now=datetime(2026, 10, 5, 19, 30, tzinfo=SG)), None)
     written = notes.write_all(vault, later, report.full_report(later))
     assert "Draws/TOTO/2026-10-05 TOTO 4124.md" in written
-    dashboard = vault.read_text("Dashboard.md")
+    dashboard = vault.read_text("Home.md")
     assert "[[Draws/TOTO/2026-10-05 TOTO 4124|2026-10-05 TOTO 4124]]" in dashboard
-    assert vault.read_note("Dashboard.md")[0]["latest_draw"] == 4124
+    assert vault.read_note("Home.md")[0]["latest_draw"] == 4124
 
     stems = {p.stem for p in _md_files(vault)}
     checked = 0

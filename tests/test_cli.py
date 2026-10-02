@@ -121,7 +121,7 @@ def vault_path(tmp_path):
 
 
 def activity(vault: Vault) -> str:
-    return "\n".join(p.read_text(encoding="utf-8") for p in (vault.base / "Logs").glob("*Activity.md"))
+    return "\n".join(p.read_text(encoding="utf-8") for p in (vault.base / "Activity").rglob("*.md"))
 
 
 # run
@@ -132,17 +132,18 @@ def test_run_dry_run_prints_two_messages(vault_path, site, sent, capsys):
     out = capsys.readouterr().out
     assert code == 0
     assert "Message 1 of 2" in out and "Message 2 of 2" in out and "Message 3" not in out
-    assert "<b>Next big prize</b>" in out
+    assert "<b>NEXT BIG PRIZE</b>" in out
     assert "Nothing was posted to Telegram." in out
     assert f"New draws: {N_DRAWS} TOTO draws." in out
     vault = Vault(vault_path)
-    assert f"Report: {vault.path('Reports/2026-10-01 1945 Report.md')}" in out
+    assert f"Report: {vault.path('Reports/2026/10/2026-10-01 1945 Report.md')}" in out
     assert out.rstrip().endswith("Done.")
     assert sent == []
     assert int(load_toto(vault.toto_csv)["draw_number"].max()) == TOTO_LAST_DRAW
     # no tickets yet, so no ledger.csv; nothing for 4D or backtests either
-    assert sorted(p.name for p in vault.data_dir.iterdir()) == ["prize_rules.json", "state.json", "toto.csv"]
-    assert vault.exists("Dashboard.md") and vault.exists("Tickets.md")
+    assert sorted(p.name for p in vault.data_dir.iterdir()) == ["last_messages.json", "prize_rules.json",
+                                                                 "state.json", "toto.csv"]
+    assert vault.exists("Home.md") and vault.exists("Tickets.md")
     assert site[0].closed  # the fetcher run made was closed
 
 
@@ -158,7 +159,7 @@ def test_run_posts_when_telegram_is_set_up(vault_path, site, sent, telegram_env,
     assert cli.main(["run", "--vault", str(vault_path)]) == 0
     assert len(sent) == 2
     assert all(not contains_dash(c["text"]) and c["parse_mode"] == "HTML" for c in sent)
-    assert sent[1]["text"].startswith(f"<b>Next TOTO draw</b> (draw {TOTO_LAST_DRAW + 1}): Mon 5 Oct 2026, 6.30pm")
+    assert sent[1]["text"].startswith(f"🔮 <b>NEXT TOTO DRAW</b> · Mon 5 Oct 2026, 6.30pm, draw {TOTO_LAST_DRAW + 1}")
     out = capsys.readouterr().out
     assert "Posted 2 messages to Telegram." in out
     assert Vault(vault_path).load_state()["last_posted"] == {"toto": TOTO_LAST_DRAW}
@@ -281,7 +282,7 @@ def test_fetch_then_report(vault_path, site, capsys):
     vault = Vault(vault_path)
     assert f"Data folder: {vault.data_dir}" in out
     assert vault.load_state()["next_draws"]["toto"]["draw_datetime"] == "2026-10-05T18:30:00+08:00"
-    assert not vault.exists("Dashboard.md")  # fetch does not analyse or write notes
+    assert not vault.exists("Home.md")  # fetch does not analyse or write notes
     assert site[0].closed
 
     site.clear()
@@ -362,12 +363,12 @@ def test_demo_command(tmp_path, offline, sent, capsys):
     assert out.startswith(f"Demo run with synthetic data in the vault at {root}. Nothing is fetched and nothing "
                           "is posted.")
     assert "Message 1 of 2" in out and "Message 2 of 2" in out and "Message 3" not in out
-    assert "WINNER!" in out
+    assert "<b>WINNER</b>" in out
     assert f"New draws: {runner.DEMO_TOTO_DRAWS} TOTO draws." in out
     assert "Nothing was posted to Telegram." in out and out.rstrip().endswith("Done.")
     assert sent == []
     vault = Vault(root)
-    assert vault.exists("Dashboard.md")
+    assert vault.exists("Home.md")
     assert len(load_toto(vault.toto_csv)) == runner.DEMO_TOTO_DRAWS
 
 
@@ -375,7 +376,7 @@ def test_demo_command_default_vault(tmp_path, offline, sent, monkeypatch, capsys
     monkeypatch.chdir(tmp_path)
     assert cli.main(["demo"]) == 0
     assert "in the vault at demo-vault." in capsys.readouterr().out
-    assert (tmp_path / cli.DEMO_VAULT / "Huat Bot" / "Dashboard.md").is_file()
+    assert (tmp_path / cli.DEMO_VAULT / "Huat Bot" / "Home.md").is_file()
 
 
 # serve
@@ -414,7 +415,7 @@ def test_serve_wires_the_scheduler(vault_path, site, sent, monkeypatch, capsys):
     assert hooks["notify_fn"]("TOTO result is late") is False  # dry run: printed, not sent
     assert "Notice (not posted): TOTO result is late" in capsys.readouterr().out
     hooks["log_fn"]("WAIT", "Result not out yet")
-    assert "| WAIT | Result not out yet |" in activity(vault)
+    assert "**WAIT** · Result not out yet" in activity(vault)
 
     assert hooks["done_fn"]("toto", date(2026, 10, 1)) is False  # nothing stored yet
     result = hooks["run_fn"](games=("toto",))

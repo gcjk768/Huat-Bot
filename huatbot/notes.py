@@ -4,9 +4,9 @@ Each builder returns ``(relative path, frontmatter, body)``; ``write_all`` hands
 ``Vault.write_note`` (atomic, skipped when unchanged) and logs every note it actually wrote as
 a NOTE event in this month's activity log.
 
-The notes are linked into one small graph: ``Dashboard.md`` links to the newest report,
+The notes are linked into one small graph: ``Home.md`` links to the newest report,
 ``Ledger``, ``Tickets``, ``Settings``, this month's activity log and the latest draw note; draw
-and report notes link back to ``[[Dashboard]]``.
+and report notes link back to ``[[Home]]``.
 
 Frontmatter uses plain Obsidian properties: ``tags`` (always ``huatbot`` plus the kind of
 note), ``draw``, ``date`` (ISO) and the figures of that note. Bodies follow the house style: no
@@ -54,7 +54,7 @@ from .vault import render_note
 
 log = logging.getLogger(__name__)
 
-DASHBOARD = "Dashboard"
+DASHBOARD = "Home"
 LEDGER = "Ledger"
 TICKETS = "Tickets"
 SETTINGS = "Settings"
@@ -91,8 +91,14 @@ def _code(text: Any) -> str:
     return f"`` {s} ``" if "`" in s else f"`{s}`"
 
 
+def report_folder(now: datetime) -> str:
+    """ "Reports/2026/10": the month folder of a run's report note."""
+    t = to_sg(now)
+    return f"{REPORT_FOLDER}/{t:%Y}/{t:%m}"
+
+
 def report_note_path(now: datetime) -> str:
-    return f"{REPORT_FOLDER}/{report_note_name(now)}.md"
+    return f"{report_folder(now)}/{report_note_name(now)}.md"
 
 
 def draw_note_path(row: Any) -> str:
@@ -134,7 +140,7 @@ def toto_draw_note(row: Any) -> NoteSpec:
 
 
 def dashboard_note(ctx: Context, report_name: str | None = None) -> NoteSpec:
-    """("Dashboard.md", frontmatter, body): next draw, buy signal, the next big prize, the latest
+    """("Home.md", frontmatter, body): next draw, buy signal, the next big prize, the latest
     result, ledger totals and links to the newest report (``report_name``, default this run's)."""
     sig = toto_signal(ctx)
     nd = next_draw(ctx)
@@ -224,7 +230,7 @@ def dashboard_note(ctx: Context, report_name: str | None = None) -> NoteSpec:
     if warnings:
         parts.append("## Warnings")
         parts.append("\n".join(f"* {w}" for w in warnings))
-    return "Dashboard.md", frontmatter, "\n\n".join(parts)
+    return "Home.md", frontmatter, "\n\n".join(parts)
 
 
 # Ledger
@@ -371,14 +377,14 @@ def _earlier_report(vault, ctx: Context, spec: NoteSpec) -> str | None:
     no near identical report."""
     rel, frontmatter, body = spec
     try:
-        folder = vault.path(REPORT_FOLDER)
+        folder = vault.path(report_folder(ctx.now))
         names = sorted(p.name for p in folder.glob(f"{to_sg(ctx.now):%Y-%m-%d} * Report.md")) \
             if folder.is_dir() else []
     except OSError:
         return None
-    if not names or f"{REPORT_FOLDER}/{names[-1]}" == rel:
+    if not names or f"{report_folder(ctx.now)}/{names[-1]}" == rel:
         return None  # nothing earlier, or this run's own report (the usual stamps check applies)
-    latest = f"{REPORT_FOLDER}/{names[-1]}"
+    latest = f"{report_folder(ctx.now)}/{names[-1]}"
     old = vault.read_text(latest)
     if old is None or _report_without_stamps(old) != _report_without_stamps(render_note(body, frontmatter)):
         return None
