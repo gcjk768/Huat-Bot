@@ -375,3 +375,36 @@ def test_serve_dry_run_cycle_runs_once_and_sends_no_notice(vault_path, site, sen
                sleep, scheduler.SchedulerConfig(), max_cycles=1, done_fn=hooks["done_fn"], games=hooks["games"])
     assert runs == [(datetime(2026, 10, 1, 19, 30, tzinfo=SG), ("toto",))]
     assert notices == [] and sent == []
+
+
+def test_load_dotenv_reads_file_without_overriding(tmp_path):
+    from huatbot.cli import load_dotenv
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "# Telegram\n"
+        "TELEGRAM_BOT_TOKEN=123:abc\n"
+        "export TELEGRAM_CHAT_ID='-1001234'\n"
+        "VAULT_FOLDER=\"Huat Bot\"\n"
+        "RUN_AT=19:30  # local time\n"
+        "DRY_RUN=1\n"
+        "not a line\n",
+        encoding="utf-8",
+    )
+    env = {"DRY_RUN": "0"}
+    loaded = load_dotenv(env_file, environ=env)
+    assert env["TELEGRAM_BOT_TOKEN"] == "123:abc"
+    assert env["TELEGRAM_CHAT_ID"] == "-1001234"
+    assert env["VAULT_FOLDER"] == "Huat Bot"
+    assert env["RUN_AT"] == "19:30"
+    assert env["DRY_RUN"] == "0"  # an existing value wins
+    assert "DRY_RUN" not in loaded
+
+
+def test_load_dotenv_can_be_switched_off(tmp_path):
+    from huatbot.cli import load_dotenv
+    env_file = tmp_path / ".env"
+    env_file.write_text("TELEGRAM_BOT_TOKEN=x\n", encoding="utf-8")
+    env = {"HUATBOT_NO_DOTENV": "1"}
+    assert load_dotenv(env_file, environ=env) == []
+    assert "TELEGRAM_BOT_TOKEN" not in env
+    assert load_dotenv(tmp_path / "missing.env", environ={}) == []

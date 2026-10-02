@@ -1,9 +1,13 @@
 """Shared fixtures. Everything is offline: synthetic history plus saved HTML pages."""
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
+
+# Never pick up a developer's real .env (and Telegram token) while testing.
+os.environ["HUATBOT_NO_DOTENV"] = "1"
 
 from huatbot.models import PrizeRules, Settings
 from huatbot.synth import synth_fourd, synth_next_fourd, synth_next_toto, synth_toto

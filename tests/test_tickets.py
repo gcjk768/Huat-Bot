@@ -648,3 +648,24 @@ def test_rules_default_used_when_missing(toto_df, fourd_df):
     text = note(f"| 4D | {iso(row['draw_date'])} | {row['first']} | Big | 1 |")
     _, settled = settle_ledger(ledger_for(text), toto_df, fourd_df, PrizeRules(), NOW)
     assert settled[0]["winnings"] == pytest.approx(C.FOURD_PRIZES["big"]["first"])
+
+
+def test_incomplete_results_keep_tickets_pending(toto_df, fourd_df, rules):
+    # A draw stored before its winning shares (TOTO) or all 23 numbers (4D) were published
+    # must not settle a ticket; the ticket waits for the complete result.
+    toto = toto_df.copy()
+    fourd = fourd_df.copy()
+    t_row = toto.index[-1]
+    f_row = fourd.index[-1]
+    toto.loc[t_row, "g7_winners"] = 0
+    fourd.loc[f_row, "consolation_10"] = ""
+    text = note(
+        f"| TOTO | {iso(toto.loc[t_row, 'draw_date'])} | {toto_text(toto.loc[t_row])} | Ordinary | 1 |",
+        f"| 4D | {iso(fourd.loc[f_row, 'draw_date'])} | {fourd.loc[f_row, 'first']} | Big | 1 |",
+    )
+    led, settled = settle_ledger(ledger_for(text), toto, fourd, rules, NOW)
+    assert settled == []
+    assert list(led["status"]) == ["pending", "pending"]
+    # Once the complete result is stored, both settle.
+    led, settled = settle_ledger(led, toto_df, fourd_df, rules, NOW)
+    assert len(settled) == 2

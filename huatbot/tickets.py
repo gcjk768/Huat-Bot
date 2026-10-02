@@ -775,8 +775,15 @@ def _result_ready(game: str, row: Any) -> bool:
         except (TypeError, ValueError):
             return False
         ok = len(set(winning)) == C.TOTO_PICK and all(1 <= n <= C.TOTO_MAX_NUMBER for n in winning)
-        return ok and 1 <= additional <= C.TOTO_MAX_NUMBER
-    return bool(prizes.fourd_row_numbers(row))
+        # The winning shares table must be in: every TOTO draw has thousands of Group 7
+        # winners, so zero means the prize amounts were not published (or read) yet.
+        try:
+            g7 = int(row["g7_winners"])
+        except (KeyError, TypeError, ValueError):
+            g7 = 0
+        return ok and 1 <= additional <= C.TOTO_MAX_NUMBER and g7 > 0
+    # All 23 numbers, so a ticket is never checked against a half published 4D result.
+    return len(prizes.fourd_row_numbers(row)) == C.FOURD_NUMBERS_PER_DRAW
 
 
 def _py(value: Any) -> Any:

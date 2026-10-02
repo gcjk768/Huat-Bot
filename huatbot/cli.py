@@ -278,8 +278,45 @@ COMMANDS: dict[str, Callable[[argparse.Namespace, bool], int]] = {
 }
 
 
+def load_dotenv(path: str | os.PathLike | None = None, environ: dict | None = None) -> list[str]:
+    """Read KEY=VALUE lines from a .env file into the environment, never overriding a set value.
+
+    Docker compose already passes .env through ``env_file``; this covers running the bot
+    straight from a shell (``python -m huatbot run``) next to a .env file. The file is ENV_FILE
+    or ./.env. HUATBOT_NO_DOTENV=1 turns it off (the test suite does). Returns the keys set.
+    """
+    environ = os.environ if environ is None else environ
+    if environ.get("HUATBOT_NO_DOTENV", "").strip().lower() in ("1", "true", "yes", "on"):
+        return []
+    path = path or environ.get("ENV_FILE") or ".env"
+    try:
+        with open(path, encoding="utf-8") as fh:
+            lines = fh.read().splitlines()
+    except OSError:
+        return []
+    loaded = []
+    for raw in lines:
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].strip()
+        key, value = (part.strip() for part in line.split("=", 1))
+        if not key.replace("_", "").isalnum():
+            continue
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+            value = value[1:-1]
+        elif " #" in value:  # trailing comment on an unquoted value
+            value = value.split(" #", 1)[0].rstrip()
+        if key not in environ:
+            environ[key] = value
+            loaded.append(key)
+    return loaded
+
+
 def main(argv: list[str] | None = None) -> int:
     """Entry point. Returns the exit code: 0 ok, 1 failure."""
+    load_dotenv()
     parser = build_parser()
     try:
         args = parser.parse_args(argv)

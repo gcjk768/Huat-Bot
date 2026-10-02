@@ -24,6 +24,8 @@ state.json keys written here:
 
 ``next_draws``      {"toto": {"draw_datetime", "jackpot_estimate", "draw_type", ...},
                      "4d": {"draw_datetime", ...}} (also read by the scheduler)
+``upcoming_draws``  every announced draw date per game, kept by ``Vault.save_state`` through
+                    ``scheduler.remember_upcoming`` so a special draw day survives a restart
 ``last_posted``     {"toto": 4123, "4d": 5432}: newest draw already posted. A scheduled run
                     (``force_post=False``) posts only when a reported game has a newer draw.
 ``posting``         {"draws": {"toto": 4123, ...}, "sent": 1, "total": 3}: a set of messages
@@ -558,12 +560,13 @@ def _fetch_summary(game: str, result: UpdateResult) -> str:
 # Fetch messages that need the user's attention (the rest are routine and summed up in the FETCH row).
 _DRAW_TYPE_LIST_FAILED = "draw list could not be used"  # cascade, Hongbao or special list
 _DATE_MISMATCH = "in the data but"  # "draw 4123 is dated ... in the data but ... on the site"
+_NOT_COMPLETE = "not complete yet"  # "draw 4123 is on the site but its winning shares are not complete yet"
 
 
 def _notable_messages(result: UpdateResult) -> list[str]:
     """The fetch messages worth a warning and an ERROR row: a draw type list that could not be
     used (new draws may then be tagged normal) and a date that differs from the site."""
-    keys = (_DRAW_TYPE_LIST_FAILED, _DATE_MISMATCH)
+    keys = (_DRAW_TYPE_LIST_FAILED, _DATE_MISMATCH, _NOT_COMPLETE)
     return [_plain(m) for m in result.messages or [] if any(k in str(m) for k in keys)]
 
 
@@ -610,12 +613,13 @@ def _update_from_site(vault: Vault, settings: Settings, state: dict, games: tupl
         notable = _notable_messages(result)
         for msg in notable:
             warnings.append(msg)
-            activity(EV_ERROR, msg.rstrip("."))
+            # A result still being published is expected right after the draw, not an error.
+            activity(EV_FETCH if _NOT_COMPLETE in msg else EV_ERROR, msg.rstrip("."))
         if result.latest_in_csv is not None and not result.verified:
             if result.latest_in_csv != result.latest_on_site:
                 warnings.append(f"{label}: the newest stored draw ({result.latest_in_csv}) does not match the "
                                 f"latest draw on the site ({result.latest_on_site}).")
-            elif not any(_DATE_MISMATCH in m for m in notable):
+            elif not any(_DATE_MISMATCH in m or _NOT_COMPLETE in m for m in notable):
                 warnings.append(f"{label}: draw {result.latest_in_csv} has a different date in the stored data "
                                 "than on the site, please check it.")
         if df.empty and not result.new_draws:
@@ -793,8 +797,12 @@ def build_context(
         if ctx.toto_picks:
             ctx.toto_plan = safe("The TOTO plan", lambda: suggest.toto_plan(
                 ctx.toto_picks, settings.toto_budget, ctx.crowd_scores, settings.offer_system7, last_draw))
+        # A next draw page that still shows the draw just held (or stored info from an earlier
+        # run) carries that draw's jackpot: leave it out so the signal, its activity log row and
+        # the commentary never present an old jackpot as the next one.
+        signal_next = next_toto if next_toto is None or report.next_info_is_current(ctx, "toto") else None
         ctx.buy_signal = safe("The buy signal",
-                              lambda: buysignal.buy_signal(next_toto, toto, settings, rules, table))
+                              lambda: buysignal.buy_signal(signal_next, toto, settings, rules, table))
 
     ctx.fourd_bet_values = safe("4D bet type values", lambda: analysis_fourd.bet_type_value(rules), {})
     if len(fourd):
