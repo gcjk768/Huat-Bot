@@ -42,10 +42,11 @@ import json
 import logging
 import os
 import time
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any
 
 import pandas as pd
 
@@ -69,9 +70,17 @@ from . import constants as C
 from . import fetch as site
 from .http import Fetcher, FetchError
 from .models import Context, NextFourD, NextToto, RunResult, Settings, UpdateResult
-from .settings import SETTINGS_TEMPLATE, load_settings
 from .report import dollars
-from .textfmt import fmt_date, fmt_datetime, money, per_dollar, plural, remove_dashes, toto_nums
+from .settings import SETTINGS_TEMPLATE, load_settings
+from .textfmt import (
+    fmt_date,
+    fmt_datetime,
+    money,
+    per_dollar,
+    plural,
+    remove_dashes,
+    toto_nums,
+)
 from .vault import SG, Vault
 
 log = logging.getLogger(__name__)
@@ -261,28 +270,36 @@ def _skip_list(state: dict, game: str) -> set[int]:
 
 
 def _track_failures(state: dict, game: str, result: UpdateResult, activity: _Activity) -> None:
-    """Count failed runs per draw; after SKIP_AFTER_FAILED_RUNS put the draw on the skip list."""
-    failures = state.setdefault("fetch_failures", {}).setdefault(game, {})
-    for n in result.new_draws:
-        failures.pop(str(n), None)
+    """Count the runs in a row in which each draw page failed; after SKIP_AFTER_FAILED_RUNS put the
+    draw on the skip list (never one of the newest SKIP_PROTECT_NEWEST draws). A draw that did not
+    fail in this run starts again from zero."""
+    all_failures = state.get("fetch_failures") or {}
+    previous = all_failures.get(game) or {}
     newest = int(result.latest_on_site or 0)
     skip = _skip_list(state, game)
+    counts: dict[str, int] = {}
     added = []
     for n in result.failed_draws:
-        count = int(failures.get(str(n), 0) or 0) + 1
+        try:
+            count = int(previous.get(str(n), 0)) + 1
+        except (TypeError, ValueError):
+            count = 1
         if count >= SKIP_AFTER_FAILED_RUNS and n <= newest - SKIP_PROTECT_NEWEST:
             skip.add(int(n))
-            failures.pop(str(n), None)
             added.append(int(n))
         else:
-            failures[str(n)] = count
+            counts[str(n)] = count
     if added:
         state.setdefault("skip", {})[game] = sorted(skip)
         activity(EV_FETCH, f"{LABELS[game]}: {plural(len(added), 'draw')} ({_span(added)}) failed in "
-                           f"{SKIP_AFTER_FAILED_RUNS} runs and went on the skip list in state.json")
-    if not failures:
-        state["fetch_failures"].pop(game, None)
-    if not state["fetch_failures"]:
+                           f"{SKIP_AFTER_FAILED_RUNS} runs in a row and went on the skip list in state.json")
+    if counts:
+        all_failures[game] = counts
+    else:
+        all_failures.pop(game, None)
+    if all_failures:
+        state["fetch_failures"] = all_failures
+    else:
         state.pop("fetch_failures", None)
 
 
@@ -1051,6 +1068,7 @@ def run(games=GAMES, *, dry_run: bool = False, fetch: bool = True, post: bool = 
         drawn = tuple(g for g in games if not (toto if g == "toto" else fourd).empty)
         ctx = build_context(toto, fourd, settings, rules, now=now, next_toto=nt, next_fourd=nf,
                             games_drawn=drawn, new_draws=data.new_draws, warnings=warnings)
+        warnings = ctx.warnings  # one list from here on, so later steps add to the report too
         _log_suggestions(ctx, activity)
 
         # 4 backtests
@@ -1078,7 +1096,6 @@ def run(games=GAMES, *, dry_run: bool = False, fetch: bool = True, post: bool = 
         result.posted = posted
         result.ok = ok
         result.new_draws = {k: list(v) for k, v in data.new_draws.items()}
-        warnings = ctx.warnings
         return result
     except Exception as exc:  # last line of defence: log it in the vault and report failure
         log.exception("Huat Bot run failed")

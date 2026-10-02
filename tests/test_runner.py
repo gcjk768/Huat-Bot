@@ -14,7 +14,7 @@ import pytest
 
 from huatbot import backtest, runner, telegram
 from huatbot import constants as C
-from huatbot.fetch import fourd_result_url, toto_result_url
+from huatbot.fetch import toto_result_url
 from huatbot.http import FetchError
 from huatbot.models import PrizeRules, Settings
 from huatbot.report import SECTION_HEADINGS
