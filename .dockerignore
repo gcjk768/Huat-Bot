@@ -1,0 +1,8 @@
+.git
+.env
+vault
+demo-vault
+tests
+__pycache__
+*.pyc
+.pytest_cache
