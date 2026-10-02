@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import math
 import threading
-from datetime import date, datetime
+from datetime import datetime
 from typing import Any, Iterable, Mapping
 
 import pandas as pd

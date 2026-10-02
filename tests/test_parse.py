@@ -490,3 +490,8 @@ def test_page_text_drops_scripts_and_styles():
     text = P.page_text("<html><head><title>T</title><script>var x='$1';</script></head>"
                        "<body><style>p{}</style><p>Hello\n  world</p></body></html>")
     assert text == "Hello world"
+
+
+def test_next_draw_impossible_date_is_none():
+    info = P.parse_toto_next_draw("<p>Next Jackpot $1,000,000 est</p><p>Next Draw Mon, 31 Feb 2026 , 6.30pm</p>")
+    assert info["draw_datetime"] is None and info["jackpot_estimate"] == 1_000_000

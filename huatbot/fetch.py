@@ -457,173 +457,191 @@ def fetch_next_draws(fetcher, toto_df: pd.DataFrame | None) -> tuple[NextToto | 
 # site check
 
 
+class _SiteCheck:
+    """Collects PASS / FAIL lines for check_site. Every item runs under a guard."""
+
+    def __init__(self, fetcher, out: Callable[[str], Any]) -> None:
+        self.fetcher = fetcher
+        self.out = out
+        self.critical: list[tuple[str, bool]] = []
+        self.optional: list[tuple[str, bool]] = []
+        self.pages: dict[str, Any] = {}
+
+    def report(self, name: str, ok: bool, detail: str, critical: bool = True) -> None:
+        tag = "PASS" if ok else "FAIL"
+        suffix = "" if critical else " (not critical)"
+        self.out(f"{tag}  {name}{suffix}: {_plain(detail)}")
+        (self.critical if critical else self.optional).append((name, ok))
+
+    def run(self, name: str, fn: Callable[[], tuple[bool, str]], critical: bool = True) -> bool:
+        try:
+            ok, detail = fn()
+        except Exception as exc:  # a parser bug must show up as a FAIL line, not a crash
+            log.exception("Site check %s failed unexpectedly", name)
+            ok, detail = False, f"unexpected error ({type(exc).__name__})"
+        self.report(name, ok, detail, critical)
+        return ok
+
+    def fetch(self, urls: list[str]) -> None:
+        try:
+            self.pages.update(self.fetcher.get_many(urls))
+        except Exception as exc:
+            for url in urls:
+                self.pages[url] = FetchError(f"fetch failed ({type(exc).__name__})", url=url)
+
+    def page(self, url: str) -> str:
+        """The page text, or raise _Unavailable with a plain reason."""
+        page = self.pages.get(url)
+        if isinstance(page, str):
+            return page
+        raise _Unavailable(f"could not fetch the page, {page if page is not None else 'no response'}")
+
+
+class _Unavailable(Exception):
+    pass
+
+
+def _guarded(fn: Callable[[], tuple[bool, str]]) -> Callable[[], tuple[bool, str]]:
+    """Turn a missing page into a FAIL detail."""
+    def inner() -> tuple[bool, str]:
+        try:
+            return fn()
+        except _Unavailable as exc:
+            return False, str(exc)
+    return inner
+
+
 def check_site(fetcher, out: Callable[[str], Any] = print) -> bool:
     """Fetch every page the bot uses, run its parser and print one PASS or FAIL line per item.
 
     Returns True only when every critical item passes. The online2 prize structure pages
     are not critical (built in prize values are used when they cannot be read).
     """
-    critical: list[tuple[str, bool]] = []
-    optional: list[tuple[str, bool]] = []
-
-    def report(name: str, ok: bool, detail: str, is_critical: bool = True) -> None:
-        tag = "PASS" if ok else "FAIL"
-        suffix = "" if is_critical else " (not critical)"
-        out(f"{tag}  {name}{suffix}: {_plain(detail)}")
-        (critical if is_critical else optional).append((name, ok))
-
-    first = [
+    chk = _SiteCheck(fetcher, out)
+    chk.fetch([
         C.TOTO_DRAW_LIST_URL, C.FOURD_DRAW_LIST_URL, C.TOTO_NEXT_DRAW_URL, C.FOURD_NEXT_DRAW_URL,
         C.TOTO_CASCADE_LIST_URL, C.TOTO_HONGBAO_LIST_URL, C.TOTO_SPECIAL_LIST_URL,
         C.TOTO_PRIZE_RULES_URL, C.FOURD_PRIZE_RULES_URL,
-    ]
-    try:
-        pages = fetcher.get_many(first)
-    except Exception as exc:
-        pages = {url: FetchError(f"fetch failed ({type(exc).__name__})") for url in first}
-
-    def page_or_reason(url: str) -> tuple[str | None, str]:
-        page = pages.get(url)
-        if isinstance(page, str):
-            return page, ""
-        return None, f"could not fetch the page, {page if page is not None else 'no response'}"
+    ])
 
     # Draw lists
-    latest: dict[str, tuple[int, date | None] | None] = {"toto": None, "4d": None}
+    latest: dict[str, tuple[int, date | None]] = {}
     for game, url in (("toto", C.TOTO_DRAW_LIST_URL), ("4d", C.FOURD_DRAW_LIST_URL)):
-        name = f"{GAME_LABELS[game]} draw list"
-        html, reason = page_or_reason(url)
-        if html is None:
-            report(name, False, reason)
-            continue
-        draws = parse_draw_list(html)
-        if not draws:
-            report(name, False, "the page has no draws in it, the layout may have changed")
-            continue
-        latest[game] = draws[0]
-        n, d = draws[0]
-        report(name, True, f"{len(draws)} draws listed, the latest is draw {n} on {_fmt_date(d)}")
+        def draw_list(game=game, url=url) -> tuple[bool, str]:
+            draws = parse_draw_list(chk.page(url))
+            if not draws:
+                return False, "the page has no draws in it, the layout may have changed"
+            latest[game] = draws[0]
+            n, d = draws[0]
+            return True, f"{len(draws)} draws listed, the latest is draw {n} on {_fmt_date(d)}"
+        chk.run(f"{GAME_LABELS[game]} draw list", _guarded(draw_list))
 
     # Latest result pages, read through the sppl link
-    result_urls = {}
-    if latest["toto"]:
-        result_urls["toto"] = toto_result_url(latest["toto"][0])
-    if latest["4d"]:
-        result_urls["4d"] = fourd_result_url(latest["4d"][0])
-    try:
-        result_pages = fetcher.get_many(list(result_urls.values())) if result_urls else {}
-    except Exception as exc:
-        result_pages = {u: FetchError(f"fetch failed ({type(exc).__name__})") for u in result_urls.values()}
+    result_urls = {game: (toto_result_url if game == "toto" else fourd_result_url)(n)
+                   for game, (n, _) in latest.items()}
+    if result_urls:
+        chk.fetch(list(result_urls.values()))
 
-    for game, parse_fn in (("toto", parse_toto_result), ("4d", parse_fourd_result)):
-        label = GAME_LABELS[game]
-        name = f"{label} latest result page"
+    def result_page(game: str) -> tuple[bool, str]:
         if game not in result_urls:
-            report(name, False, "skipped because the draw list could not be read")
-            continue
+            return False, "skipped because the draw list could not be read"
         wanted, wanted_date = latest[game]
-        page = result_pages.get(result_urls[game])
-        if not isinstance(page, str):
-            report(name, False, f"could not fetch the page for draw {wanted}, {page}")
-            continue
         try:
-            r = parse_fn(page)
+            html = chk.page(result_urls[game])
+        except _Unavailable as exc:
+            return False, f"draw {wanted}: {exc}"
+        try:
+            r = (parse_toto_result if game == "toto" else parse_fourd_result)(html)
         except ParseError as exc:
-            report(name, False, f"draw {wanted} could not be read, {exc}")
-            continue
+            return False, f"draw {wanted} could not be read, {exc}"
         if r["draw_number"] != wanted:
-            report(name, False, f"asked for draw {wanted} but the page shows draw {r['draw_number']}")
-            continue
+            return False, f"asked for draw {wanted} but the page shows draw {r['draw_number']}"
         if wanted_date is not None and r["draw_date"] != wanted_date:
-            report(name, False, f"draw {wanted} is dated {_fmt_date(r['draw_date'])} on the page but "
-                                f"{_fmt_date(wanted_date)} on the draw list")
-            continue
+            return False, (f"draw {wanted} is dated {_fmt_date(r['draw_date'])} on the page but "
+                           f"{_fmt_date(wanted_date)} on the draw list")
         if game == "toto":
             nums = " ".join(str(r[f"n{i}"]) for i in range(1, 7))
             groups = sum(1 for g in range(1, 8) if r[f"g{g}_winners"] > 0 or not pd.isna(r[f"g{g}_share"]))
-            report(name, True, f"draw {wanted} on {_fmt_date(r['draw_date'])}, numbers {nums}, additional "
-                               f"{r['additional']}, Group 1 prize {_fmt_money(r['jackpot'])}, "
-                               f"{groups} of 7 prize groups with winners")
-        else:
-            starters = sum(1 for i in range(1, 11) if r[f"starter_{i}"])
-            consolations = sum(1 for i in range(1, 11) if r[f"consolation_{i}"])
-            report(name, True, f"draw {wanted} on {_fmt_date(r['draw_date'])}, 1st {r['first'] or 'blank'}, "
-                               f"2nd {r['second'] or 'blank'}, 3rd {r['third'] or 'blank'}, "
-                               f"{starters} starter and {consolations} consolation numbers")
+            return True, (f"draw {wanted} on {_fmt_date(r['draw_date'])}, numbers {nums}, additional "
+                          f"{r['additional']}, Group 1 prize {_fmt_money(r['jackpot'])}, "
+                          f"{groups} of 7 prize groups with winners")
+        starters = sum(1 for i in range(1, 11) if r[f"starter_{i}"])
+        consolations = sum(1 for i in range(1, 11) if r[f"consolation_{i}"])
+        return True, (f"draw {wanted} on {_fmt_date(r['draw_date'])}, 1st {r['first'] or 'blank'}, "
+                      f"2nd {r['second'] or 'blank'}, 3rd {r['third'] or 'blank'}, "
+                      f"{starters} starter and {consolations} consolation numbers")
+
+    chk.run("TOTO latest result page", lambda: result_page("toto"))
+    chk.run("4D latest result page", lambda: result_page("4d"))
 
     # Next draw pages
-    html, reason = page_or_reason(C.TOTO_NEXT_DRAW_URL)
-    if html is None:
-        report("TOTO next draw page", False, reason)
-    else:
-        info = parse_toto_next_draw(html)
+    def toto_next() -> tuple[bool, str]:
+        info = parse_toto_next_draw(chk.page(C.TOTO_NEXT_DRAW_URL))
         ok = info["draw_datetime"] is not None and info["jackpot_estimate"] is not None
         hint = f", draw type {info['draw_type_hint']}" if info["draw_type_hint"] else ""
-        report("TOTO next draw page", ok,
-               f"next draw {_fmt_datetime(info['draw_datetime'])}, estimated jackpot "
-               f"{_fmt_money(info['jackpot_estimate'])}{hint}")
-    html, reason = page_or_reason(C.FOURD_NEXT_DRAW_URL)
-    if html is None:
-        report("4D next draw page", False, reason)
-    else:
-        info = parse_fourd_next_draw(html)
-        report("4D next draw page", info["draw_datetime"] is not None,
-               f"next draw {_fmt_datetime(info['draw_datetime'])}")
+        return ok, (f"next draw {_fmt_datetime(info['draw_datetime'])}, estimated jackpot "
+                    f"{_fmt_money(info['jackpot_estimate'])}{hint}")
+
+    def fourd_next() -> tuple[bool, str]:
+        info = parse_fourd_next_draw(chk.page(C.FOURD_NEXT_DRAW_URL))
+        return info["draw_datetime"] is not None, f"next draw {_fmt_datetime(info['draw_datetime'])}"
+
+    chk.run("TOTO next draw page", _guarded(toto_next))
+    chk.run("4D next draw page", _guarded(fourd_next))
 
     # Draw type lists (an empty list is fine: there may be no such draws in the window)
     for name, url in (("TOTO cascade draw list", C.TOTO_CASCADE_LIST_URL),
                       ("TOTO Hongbao draw list", C.TOTO_HONGBAO_LIST_URL),
                       ("TOTO special draw list", C.TOTO_SPECIAL_LIST_URL)):
-        html, reason = page_or_reason(url)
-        if html is None:
-            report(name, False, reason)
-            continue
-        draws = parse_draw_list(html)
-        if draws:
-            report(name, True, f"{len(draws)} draws listed, the latest is draw {draws[0][0]}")
-        elif "<select" in html.lower() or "<option" in html.lower():
-            report(name, True, "the list is empty")
-        else:
-            report(name, False, "no draw list found in the page, the layout may have changed")
+        def type_list(url=url) -> tuple[bool, str]:
+            html = chk.page(url)
+            draws = parse_draw_list(html)
+            if draws:
+                return True, f"{len(draws)} draws listed, the latest is draw {draws[0][0]}"
+            if "<select" in html.lower() or "<option" in html.lower():
+                return True, "the list is empty"
+            return False, "no draw list found in the page, the layout may have changed"
+        chk.run(name, _guarded(type_list))
 
     # Prize structure pages (not critical)
-    html, reason = page_or_reason(C.TOTO_PRIZE_RULES_URL)
-    if html is None:
-        report("TOTO prize structure page", False, f"{reason}, built in values will be used", False)
-    else:
-        rules = parse_toto_prize_structure(html)
+    def toto_prizes() -> tuple[bool, str]:
+        try:
+            rules = parse_toto_prize_structure(chk.page(C.TOTO_PRIZE_RULES_URL))
+        except _Unavailable as exc:
+            return False, f"{exc}, built in values will be used"
         if rules is None:
-            report("TOTO prize structure page", False, "the prize figures are not in the page text (the page is "
-                   "probably drawn by JavaScript), built in values will be used", False)
-        else:
-            pct = rules["group_pool_pct"]
-            parts = [f"Group {g} {_fmt_pct(pct[g])}" for g in sorted(pct)]
-            parts += [f"Group {g} {_fmt_money(v)}" for g, v in sorted(rules["fixed_prizes"].items())]
-            if rules["pool_share_of_sales"] is not None:
-                parts.append(f"prize pool {_fmt_pct(rules['pool_share_of_sales'])} of sales")
-            report("TOTO prize structure page", True, ", ".join(parts), False)
-    html, reason = page_or_reason(C.FOURD_PRIZE_RULES_URL)
-    if html is None:
-        report("4D prize structure page", False, f"{reason}, built in values will be used", False)
-    else:
-        rules = parse_fourd_prize_structure(html)
-        if rules is None:
-            report("4D prize structure page", False, "the prize table is not in the page text (the page is "
-                   "probably drawn by JavaScript), built in values will be used", False)
-        else:
-            big = ", ".join(_fmt_money(v) for v in rules["big"].values())
-            small = ", ".join(_fmt_money(v) for v in rules["small"].values())
-            ibet = " and iBet tables" if rules.get("ibet") else ""
-            report("4D prize structure page", True, f"Big per $1 {big}; Small per $1 {small}{ibet}", False)
+            return False, ("the prize figures are not in the page text (the page is probably drawn by "
+                           "JavaScript), built in values will be used")
+        pct = rules["group_pool_pct"]
+        parts = [f"Group {g} {_fmt_pct(pct[g])}" for g in sorted(pct)]
+        parts += [f"Group {g} {_fmt_money(v)}" for g, v in sorted(rules["fixed_prizes"].items())]
+        if rules["pool_share_of_sales"] is not None:
+            parts.append(f"prize pool {_fmt_pct(rules['pool_share_of_sales'])} of sales")
+        return True, ", ".join(parts)
 
-    failed = [name for name, ok in critical if not ok]
-    optional_failed = [name for name, ok in optional if not ok]
+    def fourd_prizes() -> tuple[bool, str]:
+        try:
+            rules = parse_fourd_prize_structure(chk.page(C.FOURD_PRIZE_RULES_URL))
+        except _Unavailable as exc:
+            return False, f"{exc}, built in values will be used"
+        if rules is None:
+            return False, ("the prize table is not in the page text (the page is probably drawn by "
+                           "JavaScript), built in values will be used")
+        big = ", ".join(_fmt_money(v) for v in rules["big"].values())
+        small = ", ".join(_fmt_money(v) for v in rules["small"].values())
+        ibet = " and iBet tables" if rules.get("ibet") else ""
+        return True, f"Big per $1 {big}; Small per $1 {small}{ibet}"
+
+    chk.run("TOTO prize structure page", toto_prizes, critical=False)
+    chk.run("4D prize structure page", fourd_prizes, critical=False)
+
+    failed = [name for name, ok in chk.critical if not ok]
+    optional_failed = [name for name, ok in chk.optional if not ok]
     if not failed:
-        summary = f"Summary: all {len(critical)} critical checks passed"
+        summary = f"Summary: all {len(chk.critical)} critical checks passed"
     else:
-        summary = (f"Summary: {len(failed)} of {len(critical)} critical checks failed "
-                   f"({_join(failed)})")
+        summary = f"Summary: {len(failed)} of {len(chk.critical)} critical checks failed ({_join(failed)})"
     if optional_failed:
-        summary += f", {len(optional_failed)} of {len(optional)} non critical checks failed"
+        summary += f", {len(optional_failed)} of {len(chk.optional)} non critical checks failed"
     out(_plain(summary) + ".")
     return not failed

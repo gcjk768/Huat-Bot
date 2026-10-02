@@ -12,7 +12,7 @@ from huatbot import constants as C
 from huatbot import fetch as F
 from huatbot.http import FetchError
 from huatbot.models import FOURD_NUMBER_COLUMNS, NextToto
-from huatbot.store import empty_fourd, empty_toto, normalise_toto
+from huatbot.store import empty_fourd, empty_toto
 from huatbot.synth import SG, synth_toto
 from tests import htmlgen as H
 from tests.conftest import FIXTURES
@@ -105,7 +105,8 @@ def test_tag_draw_types_inference_rules():
 def test_tag_draw_types_needs_consecutive_draws():
     df = _streak_df([1, 0, 0, 0, 0])
     df = df[df["draw_number"] != 102]  # a gap before draw 104
-    types = dict(zip(F.tag_draw_types(df, None, None, None)["draw_number"], F.tag_draw_types(df, None, None, None)["draw_type"]))
+    out = F.tag_draw_types(df, None, None, None)
+    types = dict(zip(out["draw_number"], out["draw_type"]))
     assert types[104] == "normal"
 
 
@@ -409,4 +410,23 @@ def test_check_site_with_nothing_reachable():
     assert F.check_site(H.FakeFetcher({}), out=lines.append) is False
     assert sum(line.startswith("FAIL") for line in lines) == 11
     assert any("skipped because the draw list could not be read" in line for line in lines)
+    assert_no_dashes(lines)
+
+
+def test_check_site_survives_parser_bugs_and_fetcher_errors(monkeypatch):
+    def broken(html):
+        raise RuntimeError("parser bug")
+
+    monkeypatch.setattr(F, "parse_toto_next_draw", broken)
+    lines: list[str] = []
+    assert F.check_site(static_site(), out=lines.append) is False
+    assert "FAIL  TOTO next draw page: unexpected error (RuntimeError)" in lines
+
+    class Exploding:
+        def get_many(self, urls):
+            raise RuntimeError("boom")
+
+    lines = []
+    assert F.check_site(Exploding(), out=lines.append) is False
+    assert lines[-1].startswith("Summary: 9 of 9 critical checks failed")
     assert_no_dashes(lines)
