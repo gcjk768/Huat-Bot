@@ -18,7 +18,15 @@ from zoneinfo import ZoneInfo
 import numpy as np
 import pandas as pd
 
-from huatbot import analysis_fourd, analysis_toto, backtest, buysignal, strategies, suggest, tickets
+from huatbot import (
+    analysis_fourd,
+    analysis_toto,
+    backtest,
+    buysignal,
+    strategies,
+    suggest,
+    tickets,
+)
 from huatbot import constants as C
 from huatbot.models import Context, NextFourD, NextToto, PrizeRules, Settings
 from huatbot.store import empty_ledger, fourd_numbers, toto_numbers
