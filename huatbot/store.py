@@ -20,10 +20,19 @@ def atomic_write_text(path: Path | str, text: str, encoding: str = "utf-8") -> N
     """Write via a temp file in the same folder, then rename, so readers never see half a file."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    # mkstemp creates 0600 files; keep the old file's mode, or use the normal umask for a new
+    # one, so other NAS users, SMB clients and Obsidian sync can still read the vault.
+    try:
+        mode = path.stat().st_mode & 0o777
+    except OSError:
+        umask = os.umask(0)
+        os.umask(umask)
+        mode = 0o666 & ~umask
     fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
     try:
         with os.fdopen(fd, "w", encoding=encoding, newline="") as fh:
             fh.write(text)
+        os.chmod(tmp, mode)
         os.replace(tmp, path)
     except BaseException:
         try:
