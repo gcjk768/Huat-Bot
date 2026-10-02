@@ -1,15 +1,19 @@
-"""My tickets: read Tickets.md from the vault, keep ledger.csv, check tickets against results.
+"""My tickets: read Tickets.md from the vault, keep ledger.csv, check TOTO tickets against results.
 
 The user writes tickets in the Obsidian note ``Tickets.md`` (one per table row, or one per
 line in the comma format). This module:
 
 * ``parse_tickets`` reads the note into ``Ticket`` objects, normalising cosmetic differences
-  (spacing, "$", case, "i-Bet" / "ibet", "Sys 7" / "S7", number order, ...). A line that
-  cannot be read becomes a ``Ticket`` with ``error`` set to a plain reason; it never raises.
+  (spacing, "$", case, "Sys 7" / "S7", number order, ...). A line that cannot be read becomes
+  a ``Ticket`` with ``error`` set to a plain reason; it never raises. The bot follows TOTO
+  only, so a 4D line is one of those, with ``FOURD_NOT_TRACKED`` as the reason.
 * ``ticket_id`` gives each ticket a stable id, so editing a line cosmetically does not create
   a second ledger row, while two identical lines (two real tickets) stay two rows.
 * ``sync_ledger`` adds new tickets to the ledger, ``settle_ledger`` checks pending ones
   against the stored results using ``prizes``, and ``ledger_totals`` sums it all up.
+
+Ledger rows of other games written by older versions are kept: checked (settled) ones are
+real history and are never touched; unchecked ones become "invalid" when settling.
 
 Error texts end up in the vault (Ledger.md), so they are plain English with no dashes.
 """
@@ -32,15 +36,20 @@ from . import constants as C
 from . import prizes
 from .models import LEDGER_COLUMNS, PrizeRules, Ticket
 from .store import empty_ledger, normalise_ledger
+from .textfmt import DASH_CHARS, money, plural, toto_nums
 
 log = logging.getLogger(__name__)
 
 SG = ZoneInfo(C.SG_TZ_NAME)
 
-GAMES = ("TOTO", "4D")
-FOURD_BET_TYPES = prizes.FOURD_BET_TYPES  # ("Big", "Small", "iBet Big", "iBet Small")
+GAMES = ("TOTO",)
 TOTO_BET_TYPES = ("Ordinary",) + tuple(f"System {n}" for n in sorted(C.TOTO_SYSTEM_BOARDS))
 
+# Reason given for a 4D line in Tickets.md, and result text of an unchecked 4D ledger row
+# from an older version once ``settle_ledger`` retires it.
+FOURD_NOT_TRACKED = "4D is not tracked any more, this bot follows TOTO only"
+# Result text of an unchecked ledger row of any other game (a hand edited ledger.csv).
+OTHER_GAME_NOT_TRACKED = "This game is not tracked, this bot follows TOTO only"
 # Result text of a ledger row retired by ``sync_ledger`` because its line left Tickets.md
 # before the draw was checked. Rows with this text come back if the line comes back.
 REMOVED_RESULT = "Removed from Tickets.md before it was checked"
@@ -54,19 +63,21 @@ REPLACED_PREFIX = "Replaced by an edited line in Tickets.md"
 # when the line comes back. ledger.csv has no column for it, so it rides on checked_at.
 LEFT_NOTE_MARK = "left Tickets.md"
 
+_UNCHECKED = ("pending", "no_draw")
+
 # Template
 
 TICKETS_TEMPLATE: str = """# My tickets
 
-Add every ticket you buy as a row of the table below. Huat Bot reads this note on each run, \
-checks every ticket once its draw result is out, and keeps the running totals in [[Ledger]].
+Add every TOTO ticket you buy as a row of the table below. Huat Bot reads this note on each \
+run, checks every ticket once its draw result is out, and keeps the running totals in [[Ledger]].
 
-* **Game**: TOTO or 4D.
+* **Game**: TOTO (Huat Bot follows TOTO only).
 * **Draw date**: the date of the draw, such as 5 Oct 2026, Mon 5 Oct 2026 or 5/10/2026 \
 (day first).
-* **Numbers**: TOTO numbers separated by spaces or commas (6 for Ordinary, 7 for System 7 and so \
-on, up to System 12). For 4D, the 4 digit number with any leading zeros, such as 0042.
-* **Bet type**: TOTO Ordinary or System 7 to System 12. 4D Big, Small, iBet Big or iBet Small.
+* **Numbers**: your numbers separated by spaces or commas, 6 for Ordinary, 7 for System 7 and \
+so on, up to System 12.
+* **Bet type**: Ordinary, or System 7 to System 12.
 * **Cost**: what you paid in dollars, such as 1 or $7.
 
 Old rows can stay: a ticket that has been checked stays in the ledger even if you delete its \
@@ -90,8 +101,6 @@ above and change it to match your ticket.
 ```
 | TOTO | 5 Oct 2026 | 3 11 19 27 38 45 | Ordinary | $1 |
 | TOTO | 5 Oct 2026 | 3 11 19 27 38 45 49 | System 7 | $7 |
-| 4D | 4 Oct 2026 | 0042 | Big | $2 |
-| 4D | 4 Oct 2026 | 1234 | iBet Big | $1 |
 ```
 
 You can also write one ticket per line anywhere outside the table, with commas between the parts:
@@ -112,13 +121,6 @@ _QUOTE_MARKER = re.compile(r"^(?:>\s?)+")
 _PIPE_SPLIT = re.compile(r"(?<!\\)\|")
 
 FIELDS = ("game", "date", "numbers", "bet", "cost")
-_FIELD_LABELS = {
-    "game": "game",
-    "date": "draw date",
-    "numbers": "numbers",
-    "bet": "bet type",
-    "cost": "cost",
-}
 # Header cell text (lower case, punctuation removed) -> field.
 _HEADER_NAMES = {
     "game": "game", "lottery": "game",
@@ -128,6 +130,8 @@ _HEADER_NAMES = {
     "bet type": "bet", "bet": "bet", "type": "bet",
     "cost": "cost", "price": "cost", "stake": "cost", "amount": "cost", "paid": "cost",
 }
+# Spaces, dots, underscores and dashes, which do not matter in a bet type ("Sys. 7", "S_7").
+_BET_NOISE = re.compile(rf"[\s._{re.escape(DASH_CHARS)}]+")
 
 # Dates
 
@@ -138,6 +142,7 @@ _MONTH_NAMES = tuple(calendar.month_name[i].lower() for i in range(1, 13))  # ja
 _ISO_DATE = re.compile(r"^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$")
 _DAY_FIRST = re.compile(r"^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4}|\d{2})$")
 _ORDINAL = re.compile(r"^(\d{1,2})(?:st|nd|rd|th)$")
+_UNREADABLE_DATE = "the draw date could not be read, write it like 5 Oct 2026"
 
 
 class _LineError(ValueError):
@@ -151,13 +156,13 @@ def _clean(text: Any) -> str:
     """Cell text without markdown emphasis or inline code marks, single spaced."""
     s = "" if text is None else str(text)
     s = re.sub(r"[`*]+|(?<!\w)_+|_+(?!\w)", "", s)
-    s = s.replace("\\|", "|").replace(" ", " ")
+    s = s.replace("\\|", "|").replace("\u00a0", " ")
     return re.sub(r"\s+", " ", s).strip()
 
 
 def _dollars(x: float) -> str:
-    """"$7" or "$1.50" for messages (no dashes, no sign handling needed: costs are positive)."""
-    return f"${x:,.0f}" if float(x).is_integer() else f"${x:,.2f}"
+    """ "$7" for whole dollars, "$1.50" otherwise."""
+    return money(x, cents=not float(x).is_integer())
 
 
 def _weekday_of(token: str) -> int | None:
@@ -208,9 +213,8 @@ def parse_date(text: str) -> date:
         return _make_date(_year(m.group(3)), int(m.group(2)), int(m.group(1)))
 
     tokens = [t for t in re.split(r"[\s,/.\-]+", s.lower()) if t]
-    weekday = None
-    if tokens and _weekday_of(tokens[0]) is not None:
-        weekday = _weekday_of(tokens[0])
+    weekday = _weekday_of(tokens[0]) if tokens else None
+    if weekday is not None:
         tokens = tokens[1:]
     day = month = year = None
     for tok in tokens:
@@ -224,13 +228,13 @@ def parse_date(text: str) -> date:
             elif len(tok) == 2 and year is None:
                 year = _year(tok)
             else:
-                raise _LineError("the draw date could not be read, write it like 5 Oct 2026")
+                raise _LineError(_UNREADABLE_DATE)
         elif (mo := _month_of(tok)) is not None and month is None:
             month = mo
         else:
-            raise _LineError("the draw date could not be read, write it like 5 Oct 2026")
+            raise _LineError(_UNREADABLE_DATE)
     if day is None or month is None:
-        raise _LineError("the draw date could not be read, write it like 5 Oct 2026")
+        raise _LineError(_UNREADABLE_DATE)
     if year is None:
         raise _LineError("the draw date needs a year, such as 5 Oct 2026")
     d = _make_date(year, month, day)
@@ -242,16 +246,33 @@ def parse_date(text: str) -> date:
     return d
 
 
-def parse_game(text: str) -> str:
-    """"TOTO" or "4D" (any case, spaces ignored); ValueError otherwise."""
+def _game_key(text: Any) -> str | None:
+    """ "TOTO" or "4D" for the ways people write those games (any case, spaces ignored), else
+    None. 4D is still recognised so its lines get a clear reason instead of being skipped."""
     s = _clean(text).lower().replace(" ", "")
     if s == "toto":
         return "TOTO"
     if s in ("4d", "fourd"):
         return "4D"
-    if not s:
-        raise _LineError("the game is missing, write TOTO or 4D")
-    raise _LineError("the game must be TOTO or 4D")
+    return None
+
+
+def _not_tracked(game: Any) -> str:
+    """Result text for a ledger row of a game the bot does not follow."""
+    return FOURD_NOT_TRACKED if _game_key(game) == "4D" else OTHER_GAME_NOT_TRACKED
+
+
+def parse_game(text: str) -> str:
+    """ "TOTO" (any case, spaces ignored); ValueError with a plain reason otherwise, including
+    ``FOURD_NOT_TRACKED`` for 4D."""
+    game = _game_key(text)
+    if game == "TOTO":
+        return game
+    if game == "4D":
+        raise _LineError(FOURD_NOT_TRACKED)
+    if not _clean(text):
+        raise _LineError("the game is missing, write TOTO")
+    raise _LineError("the game must be TOTO")
 
 
 def parse_cost(text: str) -> float:
@@ -269,18 +290,13 @@ def parse_cost(text: str) -> float:
     return round(value, 2)
 
 
-def _bet_key(text: str) -> str:
-    """Lower case bet text with spaces, dots, dashes and underscores removed."""
-    return re.sub(r"[\s.\-_‐‑–—]+", "", _clean(text).lower())
-
-
 def normalise_toto_bet(text: str, count: int) -> str:
-    """"Ordinary" or "System N" from "Ord", "ordinary", "", "Sys 7", "System7", "S7", ...
+    """ "Ordinary" or "System N" from "Ord", "ordinary", "", "Sys 7", "System7", "S7", ...
 
     A blank bet type means Ordinary with 6 numbers and System N with N numbers. The number
     count must match the bet type. Raises ValueError with a plain reason.
     """
-    key = _bet_key(text)
+    key = _BET_NOISE.sub("", _clean(text).lower())
     lowest, highest = min(C.TOTO_SYSTEM_BOARDS), max(C.TOTO_SYSTEM_BOARDS)
     if key == "":
         if count == C.TOTO_PICK:
@@ -307,36 +323,16 @@ def normalise_toto_bet(text: str, count: int) -> str:
     return f"System {n}"
 
 
-def normalise_fourd_bet(text: str) -> str:
-    """"Big", "Small", "iBet Big" or "iBet Small".
-
-    Accepts any case and the spellings "i-Bet", "ibet", "i bet", "iBet Big", "Big iBet".
-    Plain "iBet" means "iBet Big". Raises ValueError with a plain reason.
-    """
-    key = _bet_key(text)
-    if not key:
-        raise _LineError("the 4D bet type is missing, use Big, Small, iBet Big or iBet Small")
-    table = {
-        "big": "Big", "small": "Small",
-        "ibet": "iBet Big", "ibetbig": "iBet Big", "bigibet": "iBet Big",
-        "ibetsmall": "iBet Small", "smallibet": "iBet Small",
-    }
-    if key in table:
-        return table[key]
-    raise _LineError("the bet type is not a 4D bet, use Big, Small, iBet Big or iBet Small")
-
-
 def normalise_toto_numbers(text: str) -> list[int]:
     """Ascending TOTO numbers from "3 11 19 27 38 45", "3,11,19", "03, 11; 19", ...
 
     Checks the range and that no number repeats (the count is checked with the bet type).
     """
-    s = _clean(text)
-    tokens = [t for t in re.split(r"[\s,;/+]+|(?<=\d)[-.](?=\d)", s) if t]
+    tokens = [t for t in re.split(r"[\s,;/+]+|(?<=\d)[-.](?=\d)", _clean(text)) if t]
     if not tokens:
         raise _LineError("the numbers are missing")
     if not all(t.isdigit() for t in tokens):
-        raise _LineError("TOTO numbers must be whole numbers from 1 to 49")
+        raise _LineError(f"TOTO numbers must be whole numbers from 1 to {C.TOTO_MAX_NUMBER}")
     nums = [int(t) for t in tokens]
     for n in nums:
         if not 1 <= n <= C.TOTO_MAX_NUMBER:
@@ -347,31 +343,30 @@ def normalise_toto_numbers(text: str) -> list[int]:
     return sorted(nums)
 
 
-def normalise_fourd_number_text(text: str) -> str:
-    """The 4 digit number as written, leading zeros kept ("0042"); ValueError otherwise."""
-    s = _clean(text).replace(" ", "")
-    if not s:
-        raise _LineError("the 4D number is missing")
-    if not re.fullmatch(r"[0-9]{4}", s):
-        raise _LineError("a 4D number has exactly 4 digits, such as 0042")
-    return s
-
-
 def toto_boards_for(bet_type: str) -> int:
-    """Boards covered by a normalised TOTO bet type: 1 for Ordinary, C(n, 6) for System n."""
-    m = re.fullmatch(r"System (\d+)", str(bet_type).strip())
-    return C.TOTO_SYSTEM_BOARDS[int(m.group(1))] if m else 1
+    """Boards a TOTO bet type covers: 1 for Ordinary, C(n, 6) for System n.
 
-
-def ticket_units(game: str, bet_type: str, cost: float) -> float:
-    """Stake multiplier used by the prize functions.
-
-    TOTO: cost / boards (a $7 System 7 is 1 unit, $2 on an Ordinary set is 2 units).
-    4D: the dollars staked.
+    ValueError for a bet type that is not one of ``TOTO_BET_TYPES`` (any case or spacing).
     """
-    if str(game).upper() == "TOTO":
-        return float(cost) / (toto_boards_for(bet_type) * C.TOTO_BOARD_COST)
-    return float(cost)
+    return math.comb(prizes.toto_bet_size(bet_type), C.TOTO_PICK)
+
+
+def ticket_units(bet_type: str, cost: float) -> float:
+    """Stake per board used by the prize functions: cost / boards.
+
+    A $7 System 7 is 1 unit, $2 on an Ordinary set is 2 units.
+    """
+    return float(cost) / (toto_boards_for(bet_type) * C.TOTO_BOARD_COST)
+
+
+def _check_cost(bet_type: str, cost: float) -> None:
+    """Raise a plain reason when ``cost`` is less than the boards of the bet cost."""
+    boards = toto_boards_for(bet_type)
+    least = boards * C.TOTO_BOARD_COST
+    if cost + 1e-9 < least:
+        what = "an Ordinary ticket" if boards == 1 else bet_type
+        raise _LineError(f"{what} covers {plural(boards, 'board')} at {_dollars(C.TOTO_BOARD_COST)} "
+                         f"each, so it costs at least {_dollars(least)}")
 
 
 # Line parsing
@@ -389,38 +384,26 @@ class _Fields:
 
 
 def _build_ticket(f: _Fields, line_no: int, source: str) -> Ticket:
-    """Validate and normalise the five parts. Bad parts give a Ticket with ``error`` set."""
-    game: str = _clean(f.game)
+    """Validate and normalise the five parts. Bad parts give a Ticket with ``error`` set to
+    the first problem found, keeping whatever was read before it."""
+    game = _game_key(f.game) or _clean(f.game)
     draw_date: date | None = None
-    numbers: str = _clean(f.numbers)
-    bet_type: str = _clean(f.bet)
-    cost: float = 0.0
+    numbers = _clean(f.numbers)
+    bet_type = _clean(f.bet)
+    cost = 0.0
+    error: str | None = None
     try:
         game = parse_game(f.game)
         draw_date = parse_date(f.date)
-        if game == "TOTO":
-            nums = normalise_toto_numbers(f.numbers)
-            numbers = " ".join(str(n) for n in nums)
-            bet_type = normalise_toto_bet(f.bet, len(nums))
-        else:
-            numbers = normalise_fourd_number_text(f.numbers)
-            bet_type = normalise_fourd_bet(f.bet)
-            if bet_type.startswith("iBet") and prizes.permutations_count(numbers) == 1:
-                raise _LineError("iBet needs a number with at least two different digits")
+        nums = normalise_toto_numbers(f.numbers)
+        numbers = toto_nums(nums)
+        bet_type = normalise_toto_bet(f.bet, len(nums))
         cost = parse_cost(f.cost)
-        if game == "TOTO":
-            boards = toto_boards_for(bet_type)
-            least = boards * C.TOTO_BOARD_COST
-            if cost + 1e-9 < least:
-                what = "an Ordinary ticket" if boards == 1 else f"{bet_type}"
-                raise _LineError(f"{what} covers {boards} {'board' if boards == 1 else 'boards'} "
-                                 f"at {_dollars(C.TOTO_BOARD_COST)} each, so it costs at least "
-                                 f"{_dollars(least)}")
+        _check_cost(bet_type, cost)
     except _LineError as exc:
-        return Ticket(game=game, draw_date=draw_date, numbers=numbers, bet_type=bet_type,
-                      cost=cost, line_no=line_no, source=source, error=str(exc))
+        error = str(exc)
     return Ticket(game=game, draw_date=draw_date, numbers=numbers, bet_type=bet_type,
-                  cost=cost, line_no=line_no, source=source)
+                  cost=cost, line_no=line_no, source=source, error=error)
 
 
 def _split_row(line: str) -> list[str]:
@@ -447,8 +430,7 @@ def _header_map(cells: list[str]) -> dict[str, int] | None:
     found: dict[str, int] = {}
     for i, cell in enumerate(cells):
         key = re.sub(r"[^a-z ]+", " ", _clean(cell).lower())
-        key = re.sub(r"\s+", " ", key).strip()
-        name = _HEADER_NAMES.get(key)
+        name = _HEADER_NAMES.get(re.sub(r"\s+", " ", key).strip())
         if name and name not in found:
             found[name] = i
     if len(found) < 3:
@@ -460,19 +442,19 @@ def _header_map(cells: list[str]) -> dict[str, int] | None:
     return found
 
 
+def _is_header_row(line: str) -> bool:
+    return line.startswith("|") and _header_map(_split_row(line)) is not None
+
+
 def _fields_from_cells(cells: list[str], mapping: dict[str, int] | None) -> _Fields:
     if mapping is None:
         mapping = {name: i for i, name in enumerate(FIELDS)}
-    values = {name: (cells[i] if i < len(cells) else "") for name, i in mapping.items()}
-    return _Fields(**{name: values.get(name, "") for name in FIELDS})
+    return _Fields(**{name: (cells[i] if i < len(cells) else "") for name, i in mapping.items()})
 
 
-def _looks_like_game(text: str) -> bool:
-    try:
-        parse_game(text)
-    except _LineError:
-        return False
-    return True
+def _names_a_game(text: str) -> bool:
+    """True when the text is TOTO or 4D, so the line is meant as a ticket."""
+    return _game_key(text) is not None
 
 
 def _fields_from_plain(parts: list[str]) -> _Fields:
@@ -487,9 +469,7 @@ def _fields_from_plain(parts: list[str]) -> _Fields:
     rest = parts[1:]
     # The date: the shortest run of 1 to 3 parts that reads as a date.
     take = 1
-    for k in (1, 2, 3):
-        if k > len(rest):
-            break
+    for k in range(1, min(3, len(rest)) + 1):
         try:
             parse_date(" ".join(rest[:k]))
         except ValueError:
@@ -516,12 +496,36 @@ def _strip_comments(text: str) -> str:
 
 def _frontmatter_lines(lines: list[str]) -> int:
     """Number of leading lines taken by a YAML frontmatter block (0 if none)."""
-    if not lines or lines[0].lstrip("﻿").rstrip() != "---":
+    if not lines or lines[0].lstrip("\ufeff").rstrip() != "---":
         return 0
     for i in range(1, len(lines)):
         if lines[i].rstrip() in ("---", "..."):
             return i + 1
     return 0
+
+
+def _note_lines(md_text: str) -> list[tuple[int, str | None]]:
+    """(line number from 1, text) for every line of the note that could hold a ticket.
+
+    Frontmatter, comments and the inside of fenced code blocks are left out; quote markers
+    and outer spaces are stripped. A fence line gives None for its text (it ends a table).
+    """
+    text = md_text.removeprefix("\ufeff").replace("\r\n", "\n").replace("\r", "\n")
+    lines = _strip_comments(text).split("\n")
+    out: list[tuple[int, str | None]] = []
+    fence: tuple[str, int] | None = None  # (fence char, length) while inside a code block
+    for idx in range(_frontmatter_lines(lines), len(lines)):
+        raw = lines[idx]
+        if m := _FENCE.match(raw):
+            mark = m.group(1)
+            if fence is None:
+                fence = (mark[0], len(mark))
+            elif mark[0] == fence[0] and len(mark) >= fence[1] and not raw[m.end():].strip():
+                fence = None
+            out.append((idx + 1, None))
+        elif fence is None:
+            out.append((idx + 1, _QUOTE_MARKER.sub("", raw.strip()).strip()))
+    return out
 
 
 def parse_tickets(md_text: str) -> list[Ticket]:
@@ -533,8 +537,8 @@ def parse_tickets(md_text: str) -> list[Ticket]:
     ("- ", "* ", "1. ", "- [x] ").
     Ignored: fenced code blocks, comments, frontmatter, headings, header and separator rows,
     blank rows, prose, and rows of other tables whose first cell is not TOTO or 4D.
-    A line that is clearly a ticket but cannot be used gives a Ticket with ``error`` set.
-    Never raises.
+    A line that is clearly a ticket but cannot be used gives a Ticket with ``error`` set; a
+    4D line is one, with ``FOURD_NOT_TRACKED``. Never raises.
     """
     if not md_text:
         return []
@@ -546,66 +550,53 @@ def parse_tickets(md_text: str) -> list[Ticket]:
 
 
 def _parse_tickets(md_text: str) -> list[Ticket]:
-    text = md_text.removeprefix("\ufeff").replace("\r\n", "\n").replace("\r", "\n")
-    lines = _strip_comments(text).split("\n")
+    entries = _note_lines(md_text)
     tickets: list[Ticket] = []
-    fence: tuple[str, int] | None = None  # (fence char, length) while inside a code block
     mapping: dict[str, int] | None = None  # column map of the current ticket table
-    in_table = False
-    start = _frontmatter_lines(lines)
 
-    for idx in range(start, len(lines)):
-        line_no = idx + 1
-        raw = lines[idx]
-        if m := _FENCE.match(raw):
-            mark = m.group(1)
-            if fence is None:
-                fence = (mark[0], len(mark))
-            elif mark[0] == fence[0] and len(mark) >= fence[1] and not raw[m.end():].strip():
-                fence = None
-            in_table, mapping = False, None
-            continue
-        if fence is not None:
-            continue
-
-        line = _QUOTE_MARKER.sub("", raw.strip()).strip()
-        if not line or line.startswith("#"):
-            in_table, mapping = False, None
+    for k, (line_no, line) in enumerate(entries):
+        if not line or line.startswith("#"):  # fence, blank line or heading: a table ends
+            mapping = None
             continue
 
         if line.startswith("|"):
             cells = _split_row(line)
-            if _is_separator_row(cells):
+            if _is_separator_row(cells) or not any(_clean(c) for c in cells):
                 continue
-            if not any(_clean(c) for c in cells):
-                continue  # blank row
-            if not in_table:
-                in_table, mapping = True, None
             header = _header_map(cells)
             if header is not None:
                 mapping = header  # a header row starts (or restarts) a ticket table
                 continue
-            nxt = lines[idx + 1].strip() if idx + 1 < len(lines) else ""
-            if nxt.startswith("|") and _is_separator_row(_split_row(nxt)) \
-                    and not _looks_like_game(cells[0]):
+            nxt = entries[k + 1][1] if k + 1 < len(entries) else None
+            if nxt and nxt.startswith("|") and _is_separator_row(_split_row(nxt)) \
+                    and not _names_a_game(cells[0]):
                 continue  # header row of some other table
             f = _fields_from_cells(cells, mapping)
-            if mapping is None and not _looks_like_game(f.game):
+            if mapping is None and not _names_a_game(f.game):
                 log.debug("line %d: table row without a game, skipped", line_no)
                 continue
             tickets.append(_build_ticket(f, line_no, line))
             continue
 
-        in_table, mapping = False, None
+        mapping = None
         body = _LIST_MARKER.sub("", line, count=1).strip()
         parts = body.split(",")
-        if len(parts) < 3 or not _looks_like_game(parts[0]):
+        if len(parts) < 3 or not _names_a_game(parts[0]):
             continue  # prose
         tickets.append(_build_ticket(_fields_from_plain(parts), line_no, body))
 
     bad = sum(1 for t in tickets if t.error)
     log.debug("read %d ticket lines, %d unreadable", len(tickets), bad)
     return tickets
+
+
+def has_ticket_table(md_text: str | None) -> bool:
+    """True when the note has a ticket table header row (``| Game | Draw date | ...``) outside
+    code blocks, comments and frontmatter. ``sync_ledger`` uses it to tell a table the user
+    emptied on purpose from a missing or unreadable note."""
+    if not md_text:
+        return False
+    return any(line and _is_header_row(line) for _, line in _note_lines(str(md_text)))
 
 
 # Ticket ids
@@ -617,16 +608,13 @@ def _canonical(t: Ticket) -> tuple[str, str, str, str, str]:
     iso = t.draw_date.isoformat() if isinstance(t.draw_date, date) else str(t.draw_date or "")
     numbers = _clean(t.numbers)
     bet = _clean(t.bet_type)
-    try:
-        if game == "TOTO":
+    if game == "TOTO":
+        try:
             nums = normalise_toto_numbers(numbers)
-            numbers = " ".join(str(n) for n in nums)
+            numbers = toto_nums(nums)
             bet = normalise_toto_bet(bet, len(nums))
-        elif game == "4D":
-            numbers = normalise_fourd_number_text(numbers)
-            bet = normalise_fourd_bet(bet)
-    except ValueError:
-        pass  # keep the cleaned text; the id is still stable for the same line
+        except ValueError:
+            pass  # keep the cleaned text; the id is still stable for the same line
     try:
         cost = f"{float(t.cost):.2f}"
     except (TypeError, ValueError):
@@ -637,35 +625,12 @@ def _canonical(t: Ticket) -> tuple[str, str, str, str, str]:
 def ticket_id(t: Ticket, occurrence: int) -> str:
     """Stable 12 hex character id: sha1 of the normalised fields plus the occurrence index.
 
-    Cosmetic edits (spacing, "$", case, number order, "i-Bet" vs "iBet") keep the id.
+    Cosmetic edits (spacing, "$", case, number order, "Sys 7" vs "System 7") keep the id.
     ``occurrence`` is 0 for the first identical ticket in the note, 1 for the second, ...
     so two identical lines are two tickets.
     """
     key = "|".join(_canonical(t) + (str(int(occurrence)),))
     return hashlib.sha1(key.encode("utf-8")).hexdigest()[:12]
-
-
-def has_ticket_table(md_text: str | None) -> bool:
-    """True when the note has a ticket table header row (``| Game | Draw date | ...``) outside
-    code blocks, comments and frontmatter. ``sync_ledger`` uses it to tell a table the user
-    emptied on purpose from a missing or unreadable note."""
-    if not md_text:
-        return False
-    text = str(md_text).removeprefix("\ufeff").replace("\r\n", "\n").replace("\r", "\n")
-    lines = _strip_comments(text).split("\n")
-    fence: tuple[str, int] | None = None
-    for raw in lines[_frontmatter_lines(lines):]:
-        if m := _FENCE.match(raw):
-            mark = m.group(1)
-            if fence is None:
-                fence = (mark[0], len(mark))
-            elif mark[0] == fence[0] and len(mark) >= fence[1] and not raw[m.end():].strip():
-                fence = None
-            continue
-        line = _QUOTE_MARKER.sub("", raw.strip()).strip()
-        if fence is None and line.startswith("|") and _header_map(_split_row(line)) is not None:
-            return True
-    return False
 
 
 def ticket_ids(tickets: list[Ticket]) -> list[str | None]:
@@ -685,18 +650,19 @@ def ticket_ids(tickets: list[Ticket]) -> list[str | None]:
 # Ledger
 
 
-def _now(now: datetime | None) -> datetime:
-    return now if now is not None else datetime.now(SG)
-
-
 def _stamp(now: datetime | None) -> str:
-    return _now(now).isoformat(timespec="seconds")
+    return (now if now is not None else datetime.now(SG)).isoformat(timespec="seconds")
 
 
 def _ledger_frame(ledger: pd.DataFrame | None) -> pd.DataFrame:
     if ledger is None or len(ledger) == 0:
         return empty_ledger()
     return normalise_ledger(ledger)
+
+
+def _is_toto(df: pd.DataFrame) -> pd.Series:
+    """Rows of the ledger that are TOTO tickets (older versions also kept other games)."""
+    return df["game"].astype(str).str.strip().str.upper().eq("TOTO")
 
 
 def _row_key(row: Any) -> tuple[str, str, str, str, str]:
@@ -706,19 +672,15 @@ def _row_key(row: Any) -> tuple[str, str, str, str, str]:
                              line_no=0, source=""))
 
 
-def _in_common(game: str, a: str, b: str) -> int:
-    """TOTO numbers two sets share, or 4D digits in the same place."""
-    if game == "TOTO":
-        return len(set(a.split()) & set(b.split()))
-    return sum(p == q for p, q in zip(a, b))
+def _in_common(a: str, b: str) -> int:
+    """How many numbers two TOTO sets ("3 11 19 27 38 45") share."""
+    return len(set(a.split()) & set(b.split()))
 
 
-def _numbers_alike(game: str, a: str, b: str) -> bool:
-    """True when one set of numbers could be a typo of the other: TOTO sets sharing at least
-    half their numbers, 4D numbers with at least 2 digits in place or the same digits."""
-    if game == "TOTO":
-        return 2 * _in_common(game, a, b) >= max(len(a.split()), len(b.split()))
-    return _in_common(game, a, b) >= 2 or sorted(a) == sorted(b)
+def _numbers_alike(a: str, b: str) -> bool:
+    """True when one TOTO set could be a typo of the other: they share at least half their
+    numbers."""
+    return 2 * _in_common(a, b) >= max(len(a.split()), len(b.split()))
 
 
 def _checked_stamp(value: Any) -> str:
@@ -732,7 +694,7 @@ def _left_note(value: Any) -> bool:
 
 
 def _key_text(key: tuple) -> str:
-    """ "0601 Big $3": numbers, bet type and cost of a ``_canonical`` key."""
+    """ "3 11 19 27 38 45 Ordinary $2": numbers, bet type and cost of a ``_canonical`` key."""
     try:
         cost = _dollars(float(key[4]))
     except (TypeError, ValueError):
@@ -755,9 +717,9 @@ def _match_edits(incoming: list[tuple], old: dict[int, tuple]) -> list[tuple[int
             if prev[:2] != key[:2]:
                 continue
             diff = sum(prev[k] != key[k] for k in (2, 3, 4))
-            if diff > 1 or (prev[2] != key[2] and not _numbers_alike(key[0], prev[2], key[2])):
+            if diff > 1 or (prev[2] != key[2] and not _numbers_alike(prev[2], key[2])):
                 continue
-            rank = (diff, -_in_common(key[0], prev[2], key[2]), i)
+            rank = (diff, -_in_common(prev[2], key[2]), i)
             if best is None or rank < best:
                 best = rank
         if best is not None:
@@ -769,30 +731,32 @@ def _match_edits(incoming: list[tuple], old: dict[int, tuple]) -> list[tuple[int
 def _edited_rows(df: pd.DataFrame, incoming: list[tuple], current: set[str]) -> list[tuple[int, int]]:
     """Checked rows replaced by an edited line, as (position in ``incoming``, ledger row).
 
-    Each incoming ticket key (a new or restored line, in note order) can take a settled row
-    whose line left the note in this sync (see ``_match_edits``). A row whose line was
+    Each incoming ticket key (a new or restored line, in note order) can take a settled TOTO
+    row whose line left the note in this sync (see ``_match_edits``). A row whose line was
     already gone at an earlier sync carries ``LEFT_NOTE_MARK``: it was deleted, not edited,
     so a ticket for the same draw added later is a separate ticket and never replaces it."""
-    gone = {i: _row_key(df.loc[i]) for i in df.index
-            if df.at[i, "status"] == "settled" and df.at[i, "ticket_id"] not in current
-            and not _left_note(df.at[i, "checked_at"])}
+    candidates = (df["status"] == "settled") & _is_toto(df) & ~df["ticket_id"].isin(current)
+    gone = {i: _row_key(df.loc[i]) for i in df.index[candidates]
+            if not _left_note(df.at[i, "checked_at"])}
     return _match_edits(incoming, gone)
 
 
 def _could_be(t: Ticket, row: Any) -> bool:
-    """True when the unreadable line ``t`` could be the ledger row: same game and draw date,
-    or ones that could not be read."""
-    game = str(t.game or "").strip().upper()
+    """True when the unreadable line ``t`` could be the TOTO ledger row: its draw date is the
+    row's or could not be read. A 4D line never could, since it can never be fixed into a
+    TOTO ticket."""
+    if _game_key(t.game) == "4D":
+        return False
     day = t.draw_date.isoformat() if isinstance(t.draw_date, date) else ""
-    return ((game not in GAMES or game == str(row["game"]).strip().upper())
-            and (not day or day == str(row["draw_date"]).strip()))
+    return not day or day == str(row["draw_date"]).strip()
 
 
 def _mark_left_note(df: pd.DataFrame, current: set[str], stamp: str, unreadable: list[Ticket]) -> None:
-    """After a sync that read the note: add ``LEFT_NOTE_MARK`` to settled rows whose line is
-    gone and clear it from rows whose line is back. A row an unreadable line could be is not
-    marked yet, since that line may be its edit (it is marked once the note reads cleanly)."""
-    for i in df.index[df["status"] == "settled"]:
+    """After a sync that read the note: add ``LEFT_NOTE_MARK`` to settled TOTO rows whose line
+    is gone and clear it from rows whose line is back. A row an unreadable line could be is
+    not marked yet, since that line may be its edit (it is marked once the note reads
+    cleanly). Rows of other games are history and are left as they are."""
+    for i in df.index[(df["status"] == "settled") & _is_toto(df)]:
         value = str(df.at[i, "checked_at"] or "")
         if df.at[i, "ticket_id"] in current:
             if _left_note(value):
@@ -808,22 +772,23 @@ def sync_ledger(ledger: pd.DataFrame | None, tickets: list[Ticket], now: datetim
     Idempotent: a ticket already in the ledger (same ``ticket_id``) is left alone, so
     syncing the same note twice changes nothing.
 
-    ``retire_missing`` (an addition to the SPEC signature, on by default): a row that is
-    still unchecked (pending or no_draw) whose line is no longer in the note is marked
-    "invalid" with ``REMOVED_RESULT``, so fixing a typo in Tickets.md does not count the
-    ticket twice. It is kept in ledger.csv and comes back as pending if the line returns.
-    A checked (settled) row whose line was edited, so that a new line for the same game and
-    draw date differs from it in only one of numbers, bet type and cost, is marked "invalid"
-    with ``REPLACED_PREFIX``, the corrected line and its old result: the corrected line is
-    checked instead and the ticket is counted once (``replaced_rows`` pairs them again). Only
-    a row whose line left the note in this sync counts as edited. A checked row whose line
-    was only deleted stays settled: its checked_at gets ``LEFT_NOTE_MARK``, so a similar
-    ticket for the same draw added in a later sync is a new ticket, not an edit. A retired
-    row comes back (pending, checked again) if its line returns, and then retires the edited
-    row in the same way.
+    ``retire_missing`` (on by default): a TOTO row that is still unchecked (pending or
+    no_draw) whose line is no longer in the note is marked "invalid" with ``REMOVED_RESULT``,
+    so fixing a typo in Tickets.md does not count the ticket twice. It is kept in ledger.csv
+    and comes back as pending if the line returns.
+    A checked (settled) row whose line was edited, so that a new line for the same draw date
+    differs from it in only one of numbers, bet type and cost, is marked "invalid" with
+    ``REPLACED_PREFIX``, the corrected line and its old result: the corrected line is checked
+    instead and the ticket is counted once (``replaced_rows`` pairs them again). Only a row
+    whose line left the note in this sync counts as edited. A checked row whose line was only
+    deleted stays settled: its checked_at gets ``LEFT_NOTE_MARK``, so a similar ticket for the
+    same draw added in a later sync is a new ticket, not an edit. A retired row comes back
+    (pending, checked again) if its line returns, and then retires the edited row in the same
+    way.
     Nothing is retired when the note gave no ticket lines, unless ``note_read`` says the
     note was read and still has its ticket table (the user deleted every row); an empty or
-    unreadable note must not wipe the pending tickets.
+    unreadable note must not wipe the pending tickets. Rows of other games from older
+    versions are never touched here (``settle_ledger`` retires the unchecked ones).
     """
     df = _ledger_frame(ledger)
     ids = ticket_ids(tickets)
@@ -835,9 +800,10 @@ def sync_ledger(ledger: pd.DataFrame | None, tickets: list[Ticket], now: datetim
     if check and len(df):
         status = df["status"]
         result = df["result"].astype(str)
-        retire = status.isin(["pending", "no_draw"]) & ~df["ticket_id"].isin(current)
+        listed = df["ticket_id"].isin(current)
+        retire = status.isin(_UNCHECKED) & _is_toto(df) & ~listed
         restore = ((status == "invalid") & (result.eq(REMOVED_RESULT) | result.str.startswith(REPLACED_PREFIX))
-                   & df["ticket_id"].isin(current))
+                   & listed)
         if retire.any():
             df.loc[retire, "status"] = "invalid"
             df.loc[retire, "result"] = REMOVED_RESULT
@@ -865,7 +831,7 @@ def sync_ledger(ledger: pd.DataFrame | None, tickets: list[Ticket], now: datetim
             "numbers": t.numbers,
             "bet_type": t.bet_type,
             "cost": float(t.cost),
-            "units": ticket_units(t.game, t.bet_type, t.cost),
+            "units": ticket_units(t.bet_type, t.cost),
             "status": "pending",
             "result": "",
             "winnings": 0.0,
@@ -898,6 +864,20 @@ def sync_ledger(ledger: pd.DataFrame | None, tickets: list[Ticket], now: datetim
     return df
 
 
+def _py(value: Any) -> Any:
+    """Plain Python value for a ledger cell (NA -> None, numpy scalars -> int/float)."""
+    if value is None or (not isinstance(value, str) and pd.isna(value)):
+        return None
+    if hasattr(value, "item"):
+        return value.item()
+    return value
+
+
+def _row_dict(df: pd.DataFrame, i: Any) -> dict:
+    """Ledger row ``i`` as a plain dict of the ledger columns."""
+    return {col: _py(df.at[i, col]) for col in LEDGER_COLUMNS}
+
+
 def replaced_rows(ledger: pd.DataFrame | None, rows: list[dict]) -> dict[str, dict]:
     """The checked row each of ``rows`` replaced as an edited line, keyed by its ticket_id.
 
@@ -923,32 +903,30 @@ def replaced_rows(ledger: pd.DataFrame | None, rows: list[dict]) -> dict[str, di
     out: dict[str, dict] = {}
     for stamp, group in groups.items():
         for pos, i in _match_edits([_row_key(r) for r in group], by_stamp[stamp]):
-            out[str(group[pos]["ticket_id"])] = {col: _py(df.at[i, col]) for col in LEDGER_COLUMNS}
+            out[str(group[pos]["ticket_id"])] = _row_dict(df, i)
     return out
 
 
 @dataclass
 class _DrawIndex:
-    """Draws of one game by date, plus what is needed to prove there was no draw on a date."""
+    """TOTO draws by date, plus what is needed to prove there was no draw on a date."""
 
     by_date: dict[date, Any]  # date -> row (the highest draw number that day)
-    dates: list[date]  # ascending by draw number
-    numbers: list[int]
+    draws: list[tuple[date, int]]  # (date, draw number), ascending by draw number
 
     @classmethod
-    def build(cls, df: pd.DataFrame | None) -> "_DrawIndex":
+    def build(cls, df: pd.DataFrame | None) -> _DrawIndex:
         if df is None or len(df) == 0 or "draw_date" not in df or "draw_number" not in df:
-            return cls({}, [], [])
+            return cls({}, [])
         frame = df.copy()
         frame["draw_date"] = pd.to_datetime(frame["draw_date"], errors="coerce")
         frame["draw_number"] = pd.to_numeric(frame["draw_number"], errors="coerce")
-        frame = frame[frame["draw_date"].notna() & (frame["draw_number"] > 0)]
-        frame = frame.sort_values("draw_number")
+        frame = frame[frame["draw_date"].notna() & (frame["draw_number"] > 0)].sort_values("draw_number")
         by_date: dict[date, Any] = {}
         for _, row in frame.iterrows():
             by_date[row["draw_date"].date()] = row
-        return cls(by_date, [d.date() for d in frame["draw_date"]],
-                   [int(n) for n in frame["draw_number"]])
+        draws = [(d.date(), int(n)) for d, n in zip(frame["draw_date"], frame["draw_number"])]
+        return cls(by_date, draws)
 
     def status_without_draw(self, d: date) -> tuple[str, str]:
         """("no_draw" | "pending", result text) for a date with no draw in the data.
@@ -956,127 +934,102 @@ class _DrawIndex:
         "no_draw" only when the stored draws just before and just after the date have
         consecutive draw numbers, so no draw can be missing from the data in between.
         """
-        before = [i for i, x in enumerate(self.dates) if x < d]
-        after = [i for i, x in enumerate(self.dates) if x > d]
-        if not after:
+        prev_no = max((n for x, n in self.draws if x < d), default=None)
+        next_no = min((n for x, n in self.draws if x > d), default=None)
+        if next_no is None:
             return "pending", ""  # a future draw, or one not fetched yet
-        if not before:
+        if prev_no is None:
             return "pending", "Draw is older than the stored history"
-        prev_no = max(self.numbers[i] for i in before)
-        next_no = min(self.numbers[i] for i in after)
         if next_no == prev_no + 1:
             return "no_draw", "No draw on this date"
         return "pending", "Result not in the stored data yet"
 
 
-def _result_ready(game: str, row: Any) -> bool:
-    """True when the stored result row is complete enough to check a ticket against."""
-    if game == "TOTO":
-        try:
-            winning, additional = prizes.toto_winning(row)
-        except (TypeError, ValueError):
-            return False
-        ok = len(set(winning)) == C.TOTO_PICK and all(1 <= n <= C.TOTO_MAX_NUMBER for n in winning)
-        # The winning shares table must be in: every TOTO draw has thousands of Group 7
-        # winners, so zero means the prize amounts were not published (or read) yet.
-        try:
-            g7 = int(row["g7_winners"])
-        except (KeyError, TypeError, ValueError):
-            g7 = 0
-        return ok and 1 <= additional <= C.TOTO_MAX_NUMBER and g7 > 0
-    # All 23 numbers, so a ticket is never checked against a half published 4D result.
-    return len(prizes.fourd_row_numbers(row)) == C.FOURD_NUMBERS_PER_DRAW
+def _result_ready(row: Any) -> bool:
+    """True when the stored TOTO result row is complete enough to check a ticket against."""
+    try:
+        winning, additional = prizes.toto_winning(row)
+    except (TypeError, ValueError):
+        return False
+    ok = len(set(winning)) == C.TOTO_PICK and all(1 <= n <= C.TOTO_MAX_NUMBER for n in winning)
+    # The winning shares table must be in: every TOTO draw has thousands of Group 7
+    # winners, so zero means the prize amounts were not published (or read) yet.
+    try:
+        g7 = int(row["g7_winners"])
+    except (KeyError, TypeError, ValueError):
+        g7 = 0
+    return ok and 1 <= additional <= C.TOTO_MAX_NUMBER and g7 > 0
 
 
-def _py(value: Any) -> Any:
-    """Plain Python value for a ledger cell (NA -> None, numpy scalars -> int/float)."""
-    if value is None or (not isinstance(value, str) and pd.isna(value)):
-        return None
-    if hasattr(value, "item"):
-        return value.item()
-    return value
+def _set_status(df: pd.DataFrame, i: Any, status: str, result: str, stamp: str) -> None:
+    df.at[i, "status"] = status
+    df.at[i, "result"] = result
+    df.at[i, "checked_at"] = stamp
 
 
 def settle_ledger(ledger: pd.DataFrame | None, toto_df: pd.DataFrame | None,
-                  fourd_df: pd.DataFrame | None, rules: PrizeRules,
-                  now: datetime | None) -> tuple[pd.DataFrame, list[dict]]:
-    """Check unchecked tickets against the stored results.
+                  rules: PrizeRules | None, now: datetime | None) -> tuple[pd.DataFrame, list[dict]]:
+    """Check unchecked tickets against the stored TOTO results.
 
-    For each pending (or no_draw) row: the draw is the one with exactly the ticket's draw
-    date. If it is stored, the row is settled with ``prizes.toto_ticket_prize`` (units =
-    cost / boards) or ``prizes.fourd_ticket_prize`` (stake = cost). A date with no draw,
-    proven by consecutive draw numbers around it, becomes "no_draw"; anything else stays
-    pending (future draws, or a draw missing from the data). A row that cannot be checked at
-    all (hand edited ledger.csv with bad values) becomes "invalid". Never raises for a row.
+    For each pending (or no_draw) TOTO row: the draw is the one with exactly the ticket's draw
+    date. If it is stored with its complete result (the winning shares table included), the
+    row is settled with ``prizes.toto_ticket_prize`` (units = cost / boards). A date with no
+    draw, proven by consecutive draw numbers around it, becomes "no_draw"; anything else
+    stays pending (future draws, or a draw missing or incomplete in the data). A row that
+    cannot be checked at all (hand edited ledger.csv with bad values) becomes "invalid".
+    An unchecked row of another game from an older version becomes "invalid" with
+    ``FOURD_NOT_TRACKED`` (or ``OTHER_GAME_NOT_TRACKED``); settled rows of other games are
+    real history and stay as they are. Never raises for a row.
 
     Returns the ledger and the rows settled this run, as plain dicts of ledger columns.
     """
     df = _ledger_frame(ledger)
-    if len(df) == 0:
-        return df, []
-    unchecked = df.index[df["status"].isin(["pending", "no_draw"])]
+    unchecked = df.index[df["status"].isin(_UNCHECKED)]
     if len(unchecked) == 0:
         return df, []
     rules = rules or PrizeRules()
     stamp = _stamp(now)
-    index = {"TOTO": _DrawIndex.build(toto_df), "4D": _DrawIndex.build(fourd_df)}
-    settled_idx: list[int] = []
+    draws = _DrawIndex.build(toto_df)
+    settled_idx: list[Any] = []
 
     for i in unchecked:
         game = str(df.at[i, "game"]).strip().upper()
+        if game != "TOTO":
+            _set_status(df, i, "invalid", _not_tracked(game), stamp)
+            continue
         try:
             d = date.fromisoformat(str(df.at[i, "draw_date"]).strip())
         except ValueError:
-            df.at[i, "status"] = "invalid"
-            df.at[i, "result"] = "Draw date could not be read"
-            df.at[i, "checked_at"] = stamp
-            continue
-        if game not in index:
-            df.at[i, "status"] = "invalid"
-            df.at[i, "result"] = "Game must be TOTO or 4D"
-            df.at[i, "checked_at"] = stamp
+            _set_status(df, i, "invalid", "Draw date could not be read", stamp)
             continue
 
-        draws = index[game]
         row = draws.by_date.get(d)
-        if row is None or not _result_ready(game, row):
+        if row is None or not _result_ready(row):
             status, result = draws.status_without_draw(d) if row is None else ("pending", "")
             if status != df.at[i, "status"] or result != df.at[i, "result"]:
-                df.at[i, "status"] = status
-                df.at[i, "result"] = result
-                df.at[i, "checked_at"] = stamp
+                _set_status(df, i, status, result, stamp)
             continue
 
-        cost = float(df.at[i, "cost"])
-        bet_type = str(df.at[i, "bet_type"])
-        numbers = str(df.at[i, "numbers"])
         try:
-            if cost <= 0:
+            cost = float(df.at[i, "cost"])
+            if not cost > 0:
                 raise ValueError("cost must be above 0")
-            units = ticket_units(game, bet_type, cost)
-            if game == "TOTO":
-                res = prizes.toto_ticket_prize(numbers, bet_type, units, row, rules)
-            else:
-                res = prizes.fourd_ticket_prize(numbers, bet_type, cost, row, rules)
+            bet_type = str(df.at[i, "bet_type"])
+            units = ticket_units(bet_type, cost)
+            res = prizes.toto_ticket_prize(str(df.at[i, "numbers"]), bet_type, units, row, rules)
         except (ValueError, KeyError, TypeError) as exc:
             log.warning("ticket %s could not be checked: %s", df.at[i, "ticket_id"], exc)
-            df.at[i, "status"] = "invalid"
-            df.at[i, "result"] = "Ticket details could not be checked against the result"
-            df.at[i, "checked_at"] = stamp
+            _set_status(df, i, "invalid", "Ticket details could not be checked against the result", stamp)
             continue
 
         df.at[i, "draw_number"] = int(row["draw_number"])
         df.at[i, "units"] = float(units)
-        df.at[i, "status"] = "settled"
-        df.at[i, "result"] = res.detail
         df.at[i, "winnings"] = float(res.amount)
-        df.at[i, "checked_at"] = stamp
+        _set_status(df, i, "settled", res.detail, stamp)
         settled_idx.append(i)
 
     df = normalise_ledger(df)
-    settled = [
-        {col: _py(df.at[i, col]) for col in LEDGER_COLUMNS} for i in settled_idx
-    ]
+    settled = [_row_dict(df, i) for i in settled_idx]
     if settled:
         log.info("settled %d tickets, won %s in total", len(settled),
                  _dollars(sum(r["winnings"] or 0.0 for r in settled)))
@@ -1093,12 +1046,12 @@ def settled_rows(ledger: pd.DataFrame | None, ids: list[str]) -> list[dict]:
     for tid in ids:
         i = where.get(str(tid))
         if i is not None and df.at[i, "status"] == "settled":
-            out.append({col: _py(df.at[i, col]) for col in LEDGER_COLUMNS})
+            out.append(_row_dict(df, i))
     return out
 
 
 def ledger_totals(ledger: pd.DataFrame | None) -> dict:
-    """Totals over the ledger.
+    """Totals over the ledger (every game, so checked 4D tickets from older versions count).
 
     spent: cost of every ticket that is not invalid. won: winnings of settled tickets.
     net: won minus spent. pending_cost: cost of tickets still waiting for their draw.

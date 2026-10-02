@@ -38,11 +38,11 @@ def test_paths_default_layout(tmp_path):
     assert v.base == tmp_path / "Huat Bot"
     assert v.data_dir == tmp_path / "Huat Bot" / "Data"
     assert v.toto_csv == v.data_dir / "toto.csv"
-    assert v.fourd_csv == v.data_dir / "fourd.csv"
     assert v.ledger_csv == v.data_dir / "ledger.csv"
     assert v.state_path == v.data_dir / "state.json"
     assert v.prize_rules_path == v.data_dir / "prize_rules.json"
-    assert v.backtest_cache_path == v.data_dir / "backtest_cache.json"
+    for gone in ("fourd_csv", "backtest_cache_path"):  # 4D and backtests were removed
+        assert not hasattr(v, gone), gone
     assert v.path("Draws/TOTO", "2026-10-01 TOTO 4123.md") == v.base / "Draws" / "TOTO" / "2026-10-01 TOTO 4123.md"
     assert v.path() == v.base
 
@@ -101,8 +101,11 @@ def test_ensure_layout_creates_folders_and_templates_once(vault):
     templates = {"Settings.md": "---\na: 1\n---\n# Settings\n", "Tickets.md": "# Tickets\n"}
     created = vault.ensure_layout(templates)
     assert created == ["Settings.md", "Tickets.md"]
-    for sub in ("Data", "Draws/TOTO", "Draws/4D", "Reports", "Suggestions", "Logs"):
+    for sub in ("Data", "Draws/TOTO", "Reports", "Logs"):
         assert (vault.base / sub).is_dir(), sub
+    # Only TOTO: no 4D draw notes and no suggestion notes any more.
+    assert _tree(vault.base) == {"Data", "Draws", "Draws/TOTO", "Reports", "Logs", "Settings.md", "Tickets.md"}
+    assert V.LAYOUT_FOLDERS == ("Draws/TOTO", "Reports", "Logs")
     assert vault.read_text("Settings.md") == templates["Settings.md"]
 
     # The user edits a note in Obsidian; a second layout pass must not overwrite it.
@@ -209,7 +212,7 @@ def test_read_missing_note(vault):
 
 
 def test_read_note_bad_yaml_keeps_body_and_warns(vault, caplog):
-    vault.write_text("Settings.md", "---\ntoto_budget: [10\n---\n# Settings\n")
+    vault.write_text("Settings.md", "---\njackpot_alert: [10\n---\n# Settings\n")
     with caplog.at_level(logging.WARNING, logger="huatbot.vault"):
         fm, body = vault.read_note("Settings.md")
     assert fm == {} and body == "# Settings\n"
@@ -223,11 +226,11 @@ def test_read_note_non_mapping_yaml(vault):
 
 def test_read_note_obsidian_style_and_bom(vault):
     # What Obsidian itself writes: block lists, unquoted dates, CRLF from a Windows device, a BOM.
-    raw = "\ufeff---\r\ntags:\r\n  - huatbot\r\ndate: 2026-10-01\r\nbudget: 10\r\n---\r\n# Hi\r\n"
+    raw = "\ufeff---\r\ntags:\r\n  - huatbot\r\ndate: 2026-10-01\r\njackpot_alert: 3000000\r\n---\r\n# Hi\r\n"
     vault.path("Obs.md").parent.mkdir(parents=True, exist_ok=True)
     vault.path("Obs.md").write_bytes(raw.encode("utf-8"))
     fm, body = vault.read_note("Obs.md")
-    assert fm == {"tags": ["huatbot"], "date": "2026-10-01", "budget": 10}
+    assert fm == {"tags": ["huatbot"], "date": "2026-10-01", "jackpot_alert": 3000000}
     assert body == "# Hi\n"
 
 
@@ -245,7 +248,7 @@ def test_render_and_parse_helpers():
 
 
 def test_file_names_with_spaces_and_unicode(vault):
-    rel = "Suggestions/2026-10-05 TOTO 4124.md"
+    rel = "Draws/TOTO/2026-10-05 TOTO 4124.md"
     assert vault.write_note(rel, "Huat ah 发财", {"title": "发"})
     assert vault.read_note(rel) == ({"title": "发"}, "Huat ah 发财\n")
     assert "发" in vault.path(rel).read_text(encoding="utf-8")  # written as text, not escaped
@@ -370,17 +373,19 @@ def test_fmt_log_time(hour, minute, expected):
 def test_state_round_trip_and_unchanged_skip(vault, monkeypatch):
     assert vault.load_state() == {}
     state = {
-        "next_draws": {"toto": datetime(2026, 10, 5, 18, 30, tzinfo=SG), "4d": date(2026, 10, 3)},
+        "next_draws": {"toto": datetime(2026, 10, 5, 18, 30, tzinfo=SG)},
         "skip": {"toto": {4001, 3999}},
         "last_posted": {"toto": np.int64(4123)},
+        "last_run": {"at": date(2026, 10, 2)},
     }
     vault.save_state(state)
     loaded = vault.load_state()
     assert loaded == {
-        "next_draws": {"toto": "2026-10-05T18:30:00+08:00", "4d": "2026-10-03"},
+        "next_draws": {"toto": "2026-10-05T18:30:00+08:00"},
         "skip": {"toto": [3999, 4001]},
         "last_posted": {"toto": 4123},
-        "upcoming_draws": {"toto": ["2026-10-05"], "4d": ["2026-10-03"]},
+        "last_run": {"at": "2026-10-02"},
+        "upcoming_draws": {"toto": ["2026-10-05"]},
     }
     assert json.loads(vault.state_path.read_text()) == loaded
 
@@ -417,9 +422,10 @@ def test_load_state_drops_wrongly_shaped_values(vault):
     vault.data_dir.mkdir(parents=True)
     vault.state_path.write_text(json.dumps({
         "skip": [4000],  # should be {"toto": [4000]}
-        "fetch_failures": {"toto": {"4001": 1}, "4d": 3},
+        "fetch_failures": {"toto": {"4001": 1}},
         "last_posted": {"toto": 4123},
         "next_draws": "soon",
+        "upcoming_draws": ["2026-10-09"],  # should be {"toto": ["2026-10-09"]}
         "last_run": {"ok": True},
     }))
     state = vault.load_state()
@@ -427,9 +433,46 @@ def test_load_state_drops_wrongly_shaped_values(vault):
                      "last_run": {"ok": True}}
     errors = _activity_rows(vault, "ERROR")
     assert len(errors) == 3
-    assert any("skip is not an object" in e for e in errors)
-    assert any("fetch_failures for 4d" in e for e in errors)
-    assert any("next_draws" in e for e in errors)
+    skip = [e for e in errors if "skip is not an object" in e]
+    assert len(skip) == 1 and '"skip": {"toto": [4000]}' in skip[0] and "4d" not in skip[0]
+    assert any("next_draws is not an object" in e for e in errors)
+    assert any("upcoming_draws is not an object" in e for e in errors)
+
+
+def test_load_state_drops_wrongly_shaped_entries_of_a_game(vault):
+    vault.data_dir.mkdir(parents=True)
+    vault.state_path.write_text(json.dumps({
+        "skip": {"toto": 4000},  # should be a list of draw numbers
+        "fetch_failures": {"toto": 3},  # should be an object
+        "last_posted": {"toto": 4123},
+    }))
+    assert vault.load_state() == {"skip": {}, "fetch_failures": {}, "last_posted": {"toto": 4123}}
+    errors = _activity_rows(vault, "ERROR")
+    assert len(errors) == 2
+    assert any("skip for toto is not a list of draw numbers" in e and '"skip": {"toto": [4000]}' in e
+               for e in errors)
+    assert any("fetch_failures for toto is not an object" in e for e in errors)
+
+
+def test_state_of_an_earlier_version_with_4d_entries_still_loads_and_saves(vault):
+    # state.json written while the bot still followed 4D.
+    vault.data_dir.mkdir(parents=True)
+    old = {
+        "next_draws": {"toto": {"draw_datetime": "2026-10-12T18:30:00+08:00"},
+                       "4d": {"draw_datetime": "2026-10-10T18:30:00+08:00"},
+                       "checked_at": "2026-10-09T19:30:00+08:00"},
+        "upcoming_draws": {"toto": ["2026-10-09", "2026-10-12"], "4d": ["2026-10-10"]},
+        "last_posted": {"toto": 4123, "4d": 5432},
+        "skip": {"toto": [], "4d": [5000]},
+    }
+    vault.state_path.write_text(json.dumps(old))
+    state = vault.load_state()
+    assert state == old
+    assert _activity_rows(vault, "ERROR") == []
+    vault.save_state(state)
+    # Only TOTO dates are remembered from now on; the rest of the state is left as it was.
+    assert vault.load_state()["upcoming_draws"] == {"toto": ["2026-10-09", "2026-10-12"]}
+    assert vault.load_state()["last_posted"] == {"toto": 4123, "4d": 5432}
 
 
 def test_save_state_keeps_every_announced_draw_date(vault):
@@ -452,8 +495,8 @@ def test_save_state_keeps_every_announced_draw_date(vault):
 def test_number_shaped_strings_are_quoted_for_obsidian():
     # Obsidian reads YAML 1.2, where an unquoted 0042 is the number 42.
     from huatbot.vault import dump_frontmatter
-    text = dump_frontmatter({"first": "0042", "numbers": ["0698", "1234"], "draw": 4123, "x": "1e3"})
-    assert "first: '0042'" in text
+    text = dump_frontmatter({"code": "0042", "codes": ["0698", "1234"], "draw": 4123, "x": "1e3"})
+    assert "code: '0042'" in text
     assert "['0698', '1234']" in text
     assert "draw: 4123" in text
     assert "x: '1e3'" in text

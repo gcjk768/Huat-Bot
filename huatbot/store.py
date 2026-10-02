@@ -1,4 +1,4 @@
-"""CSV storage for draws and the ticket ledger. All writes are atomic."""
+"""CSV storage for TOTO draws and the ticket ledger. All writes are atomic."""
 from __future__ import annotations
 
 import os
@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from .models import FOURD_COLUMNS, FOURD_NUMBER_COLUMNS, LEDGER_COLUMNS, TOTO_COLUMNS
+from .models import LEDGER_COLUMNS, TOTO_COLUMNS
 
 _TOTO_INT = ["draw_number"] + [f"n{i}" for i in range(1, 7)] + ["additional"] + [
     f"g{g}_winners" for g in range(1, 8)
@@ -46,10 +46,6 @@ def empty_toto() -> pd.DataFrame:
     return normalise_toto(pd.DataFrame(columns=TOTO_COLUMNS))
 
 
-def empty_fourd() -> pd.DataFrame:
-    return normalise_fourd(pd.DataFrame(columns=FOURD_COLUMNS))
-
-
 def empty_ledger() -> pd.DataFrame:
     return normalise_ledger(pd.DataFrame(columns=LEDGER_COLUMNS))
 
@@ -67,32 +63,6 @@ def normalise_toto(df: pd.DataFrame) -> pd.DataFrame:
         df[col] = pd.to_numeric(df[col], errors="coerce").astype("float64")
     df["draw_date"] = pd.to_datetime(df["draw_date"], errors="coerce").dt.normalize()
     df["draw_type"] = df["draw_type"].fillna("normal").astype(str).replace({"": "normal", "nan": "normal"})
-    df["fetched_at"] = df["fetched_at"].fillna("").astype(str).replace({"nan": ""})
-    df = df.drop_duplicates("draw_number", keep="last").sort_values("draw_number").reset_index(drop=True)
-    return df
-
-
-def _pad4(value) -> str:
-    if value is None or (isinstance(value, float) and np.isnan(value)):
-        return ""
-    s = str(value).strip()
-    if s in ("", "nan", "None", "-"):
-        return ""
-    if s.endswith(".0"):
-        s = s[:-2]
-    return s.zfill(4) if s.isdigit() else s
-
-
-def normalise_fourd(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    for col in FOURD_COLUMNS:
-        if col not in df.columns:
-            df[col] = np.nan
-    df = df[FOURD_COLUMNS]
-    df["draw_number"] = pd.to_numeric(df["draw_number"], errors="coerce").fillna(0).astype("int64")
-    df["draw_date"] = pd.to_datetime(df["draw_date"], errors="coerce").dt.normalize()
-    for col in FOURD_NUMBER_COLUMNS:
-        df[col] = df[col].map(_pad4).astype(object)
     df["fetched_at"] = df["fetched_at"].fillna("").astype(str).replace({"nan": ""})
     df = df.drop_duplicates("draw_number", keep="last").sort_values("draw_number").reset_index(drop=True)
     return df
@@ -127,11 +97,6 @@ def load_toto(path: Path | str) -> pd.DataFrame:
     return empty_toto() if df is None else normalise_toto(df)
 
 
-def load_fourd(path: Path | str) -> pd.DataFrame:
-    df = _read_csv(Path(path), dtype={c: str for c in FOURD_NUMBER_COLUMNS})
-    return empty_fourd() if df is None else normalise_fourd(df)
-
-
 def load_ledger(path: Path | str) -> pd.DataFrame:
     df = _read_csv(Path(path), dtype={c: str for c in LEDGER_COLUMNS if c not in ("cost", "units", "winnings")})
     return empty_ledger() if df is None else normalise_ledger(df)
@@ -148,10 +113,6 @@ def save_toto(df: pd.DataFrame, path: Path | str) -> None:
     atomic_write_text(path, _to_csv_text(normalise_toto(df)))
 
 
-def save_fourd(df: pd.DataFrame, path: Path | str) -> None:
-    atomic_write_text(path, _to_csv_text(normalise_fourd(df)))
-
-
 def save_ledger(df: pd.DataFrame, path: Path | str) -> None:
     atomic_write_text(path, _to_csv_text(normalise_ledger(df)))
 
@@ -159,17 +120,6 @@ def save_ledger(df: pd.DataFrame, path: Path | str) -> None:
 def toto_numbers(row) -> list[int]:
     """The six winning numbers of a toto.csv row, ascending."""
     return sorted(int(row[f"n{i}"]) for i in range(1, 7))
-
-
-def fourd_numbers(row) -> dict[str, list[str]]:
-    """The 23 numbers of a fourd.csv row grouped by tier, blanks removed."""
-    return {
-        "first": [n for n in [row["first"]] if n],
-        "second": [n for n in [row["second"]] if n],
-        "third": [n for n in [row["third"]] if n],
-        "starter": [row[c] for c in [f"starter_{i}" for i in range(1, 11)] if row[c]],
-        "consolation": [row[c] for c in [f"consolation_{i}" for i in range(1, 11)] if row[c]],
-    }
 
 
 def no_winner_streak(df: pd.DataFrame, reset_on_cascade: bool = False) -> int:

@@ -3,6 +3,5 @@ beautifulsoup4>=4.12
 lxml>=5.0
 pandas>=2.1
 numpy>=1.26
-scipy>=1.11
 PyYAML>=6.0
 tzdata>=2024.1

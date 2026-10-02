@@ -1,7 +1,7 @@
-"""Tests for huatbot.prizes: TOTO groups, system bets, pool estimate, vectorised scoring and 4D."""
+"""Tests for huatbot.prizes: TOTO groups, system bets, the pool estimate and ticket prizes."""
 from __future__ import annotations
 
-import time
+import re
 from itertools import combinations
 from math import comb
 
@@ -109,17 +109,6 @@ def test_group_distribution_matches_constants_by_counting():
     assert per_group == C.TOTO_GROUP_COMBOS
     assert sum(per_group.values()) == C.TOTO_ANY_PRIZE_COMBOS == 260_624
     assert sum(per_group.values()) + no_prize == C.TOTO_COMBOS == 13_983_816
-
-
-def test_group_distribution_vectorised_sample_matches_odds():
-    """A large random sample through the vectorised path lands in groups at the right rates."""
-    rng = np.random.default_rng(42)
-    sets = np.argpartition(rng.random((100_000, 49)), 6, axis=1)[:, :6] + 1
-    groups = P.toto_group_matrix(sets, WIN, ADD)
-    any_prize = (groups > 0).mean()
-    assert any_prize == pytest.approx(C.TOTO_ANY_PRIZE_COMBOS / C.TOTO_COMBOS, rel=0.07)
-    g7 = (groups == 7).mean()
-    assert g7 == pytest.approx(C.TOTO_GROUP_COMBOS[7] / C.TOTO_COMBOS, rel=0.07)
 
 
 # Boards and system bets
@@ -277,7 +266,7 @@ def test_share_if_won_with_winners_but_no_share_amount_is_split():
     # Unknown pool: unknown amount, so 0.
     row = toto_row(g2_share=np.nan, g3_share=np.nan, g3_winners=0, g4_share=np.nan, g4_winners=0)
     assert P.toto_share_if_won(2, row, rules) == 0.0
-    # The backtest matrix uses the same amounts.
+    # toto_group_amounts gives the same amounts.
     row = toto_row(g2_share=np.nan)
     assert P.toto_group_amounts(row, rules)[2] == pytest.approx(0.08 * pool / 4)
 
@@ -372,285 +361,52 @@ def test_ticket_prize_detail_has_no_dashes():
         assert not any(d in detail for d in DASHES)
 
 
-# Vectorised TOTO
-
-
-def _random_sets(rng, k: int) -> np.ndarray:
-    return np.sort(np.argpartition(rng.random((k, 49)), 6, axis=1)[:, :6] + 1, axis=1)
-
-
-def _planted_sets(rng, k: int) -> np.ndarray:
-    """Sets that overlap the winning numbers heavily, so every group shows up."""
-    out = []
-    special = WIN + [ADD]
-    for _ in range(k):
-        size = int(rng.integers(2, 7))
-        chosen = list(rng.choice(special, size, replace=False))
-        rest = [n for n in range(1, 50) if n not in chosen]
-        chosen += list(rng.choice(rest, 6 - size, replace=False))
-        out.append(sorted(int(x) for x in chosen))
-    return np.array(out)
-
-
-@pytest.mark.parametrize("row_kwargs", [
-    {},
-    {"g1_winners": 0, "g1_share": np.nan},
-    {"g2_winners": 0, "g2_share": np.nan, "g3_winners": 0, "g3_share": np.nan},
-    {"draw_type": "cascade", "g1_winners": 0, "g1_share": np.nan, "g2_winners": 0, "g2_share": np.nan},
-])
-def test_prize_matrix_agrees_with_scalar(row_kwargs):
-    rules = PrizeRules()
-    row = pd.Series(toto_row(**row_kwargs))
-    rng = np.random.default_rng(3)
-    sets = np.vstack([_random_sets(rng, 3000), _planted_sets(rng, 2000)])
-    got = P.toto_prize_matrix(sets, row, rules)
-    assert got.shape == (len(sets),)
-    winning, additional = P.toto_winning(row)
-    expected = np.array([P.toto_share_if_won(P.toto_group(s, winning, additional), row, rules)
-                         for s in sets])
-    np.testing.assert_allclose(got, expected)
-    groups = P.toto_group_matrix(sets, winning, additional)
-    assert set(np.unique(groups)) == {0, 1, 2, 3, 4, 5, 6, 7}
-
-
-def test_prize_matrix_on_synthetic_history(toto_df, rules):
-    rng = np.random.default_rng(5)
-    for _, row in toto_df.tail(20).iterrows():
-        sets = np.vstack([_random_sets(rng, 200), np.array([P.toto_winning(row)[0]])])
-        got = P.toto_prize_matrix(sets, row, rules)
-        winning, additional = P.toto_winning(row)
-        expected = [P.toto_share_if_won(P.toto_group(s, winning, additional), row, rules) for s in sets]
-        np.testing.assert_allclose(got, expected)
-        assert got[-1] > 0  # the winning set itself wins Group 1
-
-
-def test_prize_matrix_is_fast():
-    rules = PrizeRules()
-    row = pd.Series(toto_row())
-    sets = _random_sets(np.random.default_rng(9), 1000)
-    P.toto_prize_matrix(sets, row, rules)  # warm up
-    best = float("inf")
-    for _ in range(7):
-        start = time.perf_counter()
-        P.toto_prize_matrix(sets, row, rules)
-        best = min(best, time.perf_counter() - start)
-    assert best < 0.010, f"1000 sets took {best * 1000:.2f} ms"
-
-
-def test_prize_matrix_shapes_and_validation():
+@pytest.mark.parametrize("n", sorted(C.TOTO_SYSTEM_BOARDS))
+def test_ticket_prize_every_system_size(n):
     rules = PrizeRules()
     row = toto_row()
-    assert P.toto_prize_matrix(np.zeros((0, 6), dtype=int), row, rules).shape == (0,)
-    single = P.toto_prize_matrix(np.array(WIN), row, rules)
-    assert single.shape == (1,) and single[0] == pytest.approx(800_000)
+    nums = WIN[:3] + [ADD] + NON_WIN[: n - 4]
+    res = P.toto_ticket_prize(nums, f"System {n}", 1.0, row, rules)
+    assert res.groups == P.toto_group_counts(nums, WIN, ADD)
+    assert sum(res.groups.values()) <= C.TOTO_SYSTEM_BOARDS[n]
+    assert res.amount == pytest.approx(sum(row[f"g{g}_share"] * k for g, k in res.groups.items()))
+
+
+def test_ticket_prize_on_synthetic_history(toto_df, rules):
+    """The winning set of every stored draw wins Group 1: the published share when the page
+    shows winners, else the whole jackpot. A set with none of the drawn numbers wins nothing."""
+    for _, row in toto_df.tail(40).iterrows():
+        winning, additional = P.toto_winning(row)
+        res = P.toto_ticket_prize(winning, "Ordinary", 1.0, row, rules)
+        assert res.groups == {1: 1} and res.detail == "Group 1 x1"
+        if int(row["g1_winners"]) > 0:
+            assert res.amount == pytest.approx(round(float(row["g1_share"]), 2))
+        else:
+            assert res.amount == pytest.approx(float(row["jackpot"]))
+        losing = [n for n in range(1, 50) if n not in winning and n != additional][:6]
+        res = P.toto_ticket_prize(losing, "Ordinary", 1.0, row, rules)
+        assert (res.amount, res.groups, res.detail) == (0.0, {}, "No prize")
+
+
+# Bet types
+
+
+@pytest.mark.parametrize("bet, size", [
+    ("Ordinary", 6), ("ord", 6), ("", 6), (None, 6), (" ORDINARY ", 6),
+    ("System 7", 7), ("system7", 7), ("SYSTEM  12", 12),
+])
+def test_toto_bet_size(bet, size):
+    assert P.toto_bet_size(bet) == size
+
+
+@pytest.mark.parametrize("bet", ["System 6", "System 13", "Big", "iBet Big", "Lucky Dip"])
+def test_toto_bet_size_rejects_other_bets(bet):
     with pytest.raises(ValueError):
-        P.toto_prize_matrix(np.array([[1, 2, 3, 4, 5]]), row, rules)
+        P.toto_bet_size(bet)
     with pytest.raises(ValueError):
-        P.toto_prize_matrix(np.array([[1, 1, 2, 3, 4, 5]]), row, rules)
-    with pytest.raises(ValueError):
-        P.toto_prize_matrix(np.array([[0, 1, 2, 3, 4, 5]]), row, rules)
+        P.toto_ticket_prize(WIN, bet, 1.0, toto_row(), PrizeRules())
 
 
-def test_popcount_fallback_matches():
-    rng = np.random.default_rng(0)
-    x = rng.integers(0, 2**62, size=5000, dtype=np.uint64) | np.uint64(1 << 63)
-    expected = np.array([bin(int(v)).count("1") for v in x])
-    np.testing.assert_array_equal(P._popcount_swar(x), expected)
-    np.testing.assert_array_equal(P._popcount(x), expected)
-
-
-# 4D
-
-
-def fourd_row(**overrides) -> dict:
-    row = {"draw_number": 5432, "draw_date": pd.Timestamp("2026-09-30"),
-           "first": "1234", "second": "5678", "third": "0042", "fetched_at": "test"}
-    starters = ["1111", "2222", "3333", "4321", "0001", "9090", "1243", "", "7777", "8888"]
-    consols = ["0000", "9999", "5555", "6666", "1234", "2143", "3412", "0420", "", "1324"]
-    for i in range(10):
-        row[f"starter_{i + 1}"] = starters[i]
-        row[f"consolation_{i + 1}"] = consols[i]
-    row.update(overrides)
-    return row
-
-
-@pytest.mark.parametrize("number,count", [("1234", 24), ("1123", 12), ("1122", 6), ("1112", 4),
-                                          ("1111", 1), ("0042", 12), ("0004", 4)])
-def test_permutations(number, count):
-    perms = P.permutations(number)
-    assert len(perms) == count == P.permutations_count(number)
-    assert perms == sorted(perms) and len(set(perms)) == count
-    assert all(sorted(p) == sorted(number) for p in perms)
-    assert number in perms
-
-
-def test_permutations_reject_bad_numbers():
-    for bad in ("123", "12345", "12a4", "", "-123"):
-        with pytest.raises(ValueError):
-            P.permutations_count(bad)
-    assert P.permutations(42) == P.permutations("0042")
-
-
-def test_ibet_table_default_floor():
-    rules = PrizeRules()
-    assert P.ibet_table(rules, "big", 24) == {"first": 83, "second": 41, "third": 20,
-                                             "starter": 10, "consolation": 2}
-    assert P.ibet_table(rules, "small", 24) == {"first": 125, "second": 83, "third": 33}
-    assert P.ibet_table(rules, "Big", 4) == {"first": 500, "second": 250, "third": 122,
-                                            "starter": 62, "consolation": 15}
-    assert P.ibet_table(rules, "big", 1) == C.FOURD_PRIZES["big"]
-    with pytest.raises(ValueError):
-        P.ibet_table(rules, "big", 0)
-    with pytest.raises(ValueError):
-        P.ibet_table(rules, "medium", 24)
-
-
-def test_ibet_table_uses_published_values():
-    rules = PrizeRules(ibet_prizes={"big": {24: {"first": 84.0, "second": 42.0}},
-                                    "small": {"12": {"first": 251.0}}})
-    table = P.ibet_table(rules, "big", 24)
-    assert table["first"] == 84 and table["second"] == 42 and table["third"] == 20
-    assert P.ibet_table(rules, "small", 12)["first"] == 251  # JSON style string key
-    assert P.ibet_table(rules, "big", 12)["first"] == 166
-    assert P.ibet_is_published(rules, "big", 24) and not P.ibet_is_published(rules, "big", 12)
-
-
-def test_fourd_hits():
-    row = fourd_row()
-    assert P.fourd_hits("1234", row) == ["first", "consolation"]
-    assert P.fourd_hits("4321", row) == ["starter"]
-    assert P.fourd_hits("0042", row) == ["third"]
-    assert P.fourd_hits("4242", row) == []
-    assert P.fourd_hits(42, row) == ["third"]
-
-
-def test_fourd_ticket_prize_big_and_small():
-    rules = PrizeRules()
-    row = fourd_row()
-    res = P.fourd_ticket_prize("1234", "Big", 1, row, rules)
-    assert res.amount == 2000 + 60 and res.groups == {"first": 1, "consolation": 1}
-    assert res.detail == "1st Prize x1, Consolation x1"
-    assert P.fourd_ticket_prize("1234", "Big", 3, row, rules).amount == 3 * 2060
-    res = P.fourd_ticket_prize("1234", "Small", 2, row, rules)
-    assert res.amount == 6000 and res.groups == {"first": 1}
-    # Small pays nothing for Starter or Consolation.
-    res = P.fourd_ticket_prize("4321", "Small", 5, row, rules)
-    assert res.amount == 0 and res.groups == {} and res.detail == "No prize"
-    assert P.fourd_ticket_prize("4321", "big", 5, row, rules).amount == 5 * 250
-    assert P.fourd_ticket_prize("0042", "Small", 1, row, rules).amount == 800
-    assert P.fourd_ticket_prize("5678", "Small", 1, row, rules).amount == 2000
-
-
-def test_fourd_ticket_prize_ibet():
-    rules = PrizeRules()
-    row = fourd_row()
-    # 1234 covers 24 arrangements; winners among them: first 1234, starters 4321 and 1243,
-    # consolations 1234, 2143, 3412, 1324.
-    res = P.fourd_ticket_prize("4123", "iBet Big", 1, row, rules)
-    assert res.groups == {"first": 1, "starter": 2, "consolation": 4}
-    assert res.amount == 83 + 2 * 10 + 4 * 2
-    res = P.fourd_ticket_prize("4123", "iBet Big", 2, row, rules)
-    assert res.amount == 2 * (83 + 2 * 10 + 4 * 2)
-    res = P.fourd_ticket_prize("4123", "iBet Small", 1, row, rules)
-    assert res.groups == {"first": 1} and res.amount == 125
-    # 0042 has 12 arrangements: third prize 0042 and consolation 0420 are both covered.
-    res = P.fourd_ticket_prize("4200", "iBet Big", 1, row, rules)
-    assert res.groups == {"third": 1, "consolation": 1}
-    assert res.amount == 490 // 12 + 60 // 12
-    # A number with 1 arrangement pays the straight table.
-    assert P.fourd_ticket_prize("1111", "iBet Big", 1, row, rules).amount == 250
-
-
-def test_fourd_ticket_prize_validation():
-    rules = PrizeRules()
-    row = fourd_row()
-    with pytest.raises(ValueError):
-        P.fourd_ticket_prize("1234", "Huge", 1, row, rules)
-    with pytest.raises(ValueError):
-        P.fourd_ticket_prize("123", "Big", 1, row, rules)
-    with pytest.raises(ValueError):
-        P.fourd_ticket_prize("1234", "Big", -1, row, rules)
-
-
-def test_fourd_row_numbers_skip_blanks():
-    row = fourd_row(first="", starter_1=np.nan, consolation_1=None)
-    pairs = P.fourd_row_numbers(pd.Series(row))
-    assert len(pairs) == 23 - 2 - 3  # two blanks in the fixture plus three cleared
-    assert all(len(n) == 4 for _, n in pairs)
-    assert P.fourd_hits("1234", row) == ["consolation"]
-
-
-@pytest.mark.parametrize("bet", ["big", "small"])
-def test_fourd_prize_vector_agrees_with_ticket_prize(bet, fourd_df):
-    rules = PrizeRules()
-    rng = np.random.default_rng(4)
-    for row in (pd.Series(fourd_row()), fourd_df.iloc[-1]):
-        winners = [int(n) for _, n in P.fourd_row_numbers(row)]
-        sample = np.unique(np.concatenate([winners, rng.integers(0, 10_000, 1500)]))
-        vec = P.fourd_prize_vector(sample, row, rules, bet=bet)
-        scalar = [P.fourd_ticket_prize(f"{n:04d}", bet.title(), 1, row, rules).amount for n in sample]
-        np.testing.assert_allclose(vec, scalar)
-
-
-@pytest.mark.parametrize("bet", ["Big", "Small"])
-def test_mean_prize_over_every_number_is_expected_return(bet, fourd_df):
-    """A draw has 23 distinct winning numbers, so the average $1 prize over all 10,000
-    numbers is exactly the expected return per $1."""
-    rules = PrizeRules()
-    for _, row in fourd_df.tail(5).iterrows():
-        vec = P.fourd_prize_vector(np.arange(10_000), row, rules, bet=bet)
-        assert vec.mean() == pytest.approx(P.fourd_expected_return(rules, bet))
-
-
-def test_fourd_prize_vector_shapes_and_validation():
-    rules = PrizeRules()
-    row = fourd_row()
-    out = P.fourd_prize_vector(np.array([[1234, 42], [4321, 7]]), row, rules)
-    assert out.shape == (2, 2)
-    assert out.tolist() == [[2060.0, 490.0], [250.0, 0.0]]
-    with pytest.raises(ValueError):
-        P.fourd_prize_vector(np.array([10_000]), row, rules)
-    with pytest.raises(ValueError):
-        P.fourd_prize_vector(np.array([1]), row, rules, bet="iBet Big")
-
-
-EXPECTED_IBET = {
-    "iBet Big": {24: 0.6336, 12: 0.6468, 6: 0.654, 4: 0.6568},
-    "iBet Small": {24: 0.5784, 12: 0.5784, 6: 0.5796, 4: 0.58},
-}
-
-
-def test_expected_returns_exact():
-    rules = PrizeRules()
-    assert P.fourd_expected_return(rules, "Big") == pytest.approx(0.659)
-    assert P.fourd_expected_return(rules, "Small") == pytest.approx(0.58)
-    for bet, by_perm in EXPECTED_IBET.items():
-        for perms, value in by_perm.items():
-            assert P.fourd_expected_return(rules, bet, perms) == pytest.approx(value)
-    with pytest.raises(ValueError):
-        P.fourd_expected_return(rules, "iBet Big")
-
-
-def test_ibet_payouts_cover_each_winner_perms_times(fourd_df):
-    """Every winning number is covered by exactly ``perms`` iBet tickets, each paid the iBet
-    amount, so summed over all tickets of a shape the payout is perms x iBet prize per
-    winner of that shape. This is what makes the iBet expected return perms x table / 10,000."""
-    rules = PrizeRules()
-    row = fourd_df.iloc[-1]
-    pairs = P.fourd_row_numbers(row)
-    covered = sorted({p for _, n in pairs for p in P.permutations(n)})
-    totals: dict[int, float] = {}
-    for n in covered:
-        perms = P.permutations_count(n)
-        totals[perms] = totals.get(perms, 0.0) + P.fourd_ticket_prize(n, "iBet Big", 1, row, rules).amount
-    for perms in set(totals) | {4, 6, 12, 24}:
-        table = P.ibet_table(rules, "big", perms)
-        expected = sum(perms * table[t] for t, n in pairs if P.permutations_count(n) == perms)
-        assert totals.get(perms, 0.0) == pytest.approx(expected)
-    # Tickets that cover no winning number win nothing.
-    rng = np.random.default_rng(8)
-    covered_set = set(covered)
-    for n in rng.integers(0, 10_000, 300):
-        number = f"{n:04d}"
-        if number not in covered_set:
-            assert P.fourd_ticket_prize(number, "iBet Big", 1, row, rules).amount == 0
+def test_module_is_toto_only():
+    names = [n for n in dir(P) if not n.startswith("__")]
+    assert not [n for n in names if re.search(r"fourd|4d|ibet|permutation|straight|matrix", n, re.I)]

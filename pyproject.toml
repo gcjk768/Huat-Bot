@@ -1,7 +1,7 @@
 [project]
 name = "huatbot"
 version = "0.1.0"
-description = "Singapore Pools 4D and TOTO analyst bot: scrapes results, analyses history, suggests numbers within a budget, posts to Telegram and keeps everything in an Obsidian vault."
+description = "Singapore Pools TOTO bot: scrapes results, works out what the next draws are likely to do and where the next big prize is, checks your tickets, posts to Telegram and keeps everything in an Obsidian vault."
 requires-python = ">=3.11"
 readme = "README.md"
 

@@ -10,8 +10,7 @@ import pytest
 
 from huatbot import constants as C
 from huatbot import parse as P
-from huatbot.models import FOURD_NUMBER_COLUMNS
-from huatbot.synth import SG, synth_fourd, synth_toto
+from huatbot.synth import SG, synth_toto
 from tests import htmlgen as H
 
 TOTO_RESULT_KEYS = (
@@ -106,10 +105,16 @@ def test_parse_draw_date_rejects(bad):
     ("$2 Million", 2000000.0),
     ("$10 per winning share", 10.0),
     ("-", None),
+    ("\u2013", None),
+    ("\u2014", None),
+    ("$", None),
+    ("$ -", None),
     ("", None),
     ("  ", None),
     (None, None),
     ("To be announced", None),
+    (1500, 1500.0),
+    (float("nan"), None),
 ])
 def test_parse_money(text, expected):
     assert P.parse_money(text) == expected
@@ -133,13 +138,6 @@ def test_toto_draw_list_fixture(fixture_html):
     assert [n for n, _ in draws] == sorted((n for n, _ in draws), reverse=True)
     for n, d in draws:  # TOTO draws are on Mondays and Thursdays
         assert d.weekday() in C.TOTO_WEEKDAYS
-
-
-def test_fourd_draw_list_fixture(fixture_html):
-    draws = P.parse_draw_list(fixture_html("fourd_draw_list.html"))
-    assert draws[0] == (5432, date(2026, 9, 30))
-    assert len(draws) == 10
-    assert all(d.weekday() in C.FOURD_WEEKDAYS for _, d in draws)
 
 
 def test_cascade_list_fixture(fixture_html):
@@ -302,81 +300,6 @@ def test_toto_result_group_label_in_a_th_cell_is_read():
     assert r["g7_share"] == float(row["g7_share"])
 
 
-# 4D result pages
-
-
-def test_fourd_result_fixture(fixture_html):
-    r = P.parse_fourd_result(fixture_html("fourd_result.html"))
-    assert r["draw_number"] == 5432
-    assert r["draw_date"] == date(2026, 9, 30)
-    assert (r["first"], r["second"], r["third"]) == ("0417", "8826", "3095")
-    assert [r[f"starter_{i}"] for i in range(1, 11)] == [
-        "1203", "4410", "5567", "6721", "7790", "0038", "2264", "3389", "8152", "9903"]
-    assert [r[f"consolation_{i}"] for i in range(1, 11)] == [
-        "0105", "1447", "2398", "3561", "4672", "5783", "6894", "7015", "8126", "9237"]
-    assert set(r) == {"draw_number", "draw_date", *FOURD_NUMBER_COLUMNS}
-
-
-def test_fourd_round_trip_every_synthetic_row(fourd_df):
-    for _, row in fourd_df.iterrows():
-        parsed = P.parse_fourd_result(H.fourd_result_html(row))
-        assert parsed["draw_number"] == row["draw_number"]
-        assert parsed["draw_date"] == row["draw_date"].date()
-        for key in FOURD_NUMBER_COLUMNS:
-            assert parsed[key] == row[key], (int(row["draw_number"]), key)
-
-
-def test_fourd_blank_cells_become_empty_strings():
-    row = synth_fourd(n_draws=3).iloc[-1].copy()
-    row["starter_10"] = ""
-    row["consolation_3"] = ""
-    row["third"] = ""
-    r = P.parse_fourd_result(H.fourd_result_html(row))
-    assert r["starter_10"] == "" and r["consolation_3"] == "" and r["third"] == ""
-    assert r["first"] == row["first"]
-
-
-def test_fourd_renamed_prize_sections_raise(fixture_html):
-    html = fixture_html("fourd_result.html")
-    for cls in ("tbodyStarterPrizes", "tbodyConsolationPrizes"):
-        with pytest.raises(P.ParseError, match="not found"):
-            P.parse_fourd_result(html.replace(cls, "tbodySomethingElse"))
-
-
-def test_fourd_extra_label_and_spacer_cells_do_not_shift_numbers():
-    row = synth_fourd(n_draws=3).iloc[-1]
-    html = H.fourd_result_html(row)
-    noisy = html.replace("<tbody class='tbodyStarterPrizes'>",
-                         "<tbody class='tbodyStarterPrizes'><tr><td>Starter Prizes</td><td> </td></tr>")
-    r = P.parse_fourd_result(noisy)
-    assert [r[f"starter_{i}"] for i in range(1, 11)] == [row[f"starter_{i}"] for i in range(1, 11)]
-
-
-def test_fourd_wrong_count_or_long_number_raises():
-    row = synth_fourd(n_draws=3).iloc[-1]
-    html = H.fourd_result_html(row)
-    nine = html.replace(f"<td>{row['starter_10']}</td>", "", 1)
-    with pytest.raises(P.ParseError, match="expected 10"):
-        P.parse_fourd_result(nine)
-    longer = html.replace(f"<td>{row['consolation_1']}</td>", "<td>12345</td>", 1)
-    with pytest.raises(P.ParseError, match="4 digit"):
-        P.parse_fourd_result(longer)
-    all_blank = row.copy()
-    for i in range(1, 11):
-        all_blank[f"starter_{i}"] = ""
-    with pytest.raises(P.ParseError):
-        P.parse_fourd_result(H.fourd_result_html(all_blank))
-
-
-def test_fourd_missing_draw_number_raises(fixture_html):
-    html = fixture_html("fourd_result.html").replace("class='drawNumber'", "class='x'")
-    with pytest.raises(P.ParseError):
-        P.parse_fourd_result(html)
-    with pytest.raises(P.ParseError):
-        P.parse_fourd_result("<table><tr><th class='drawNumber'>Draw No. 5</th>"
-                             "<th class='drawDate'>Wed, 30 Sep 2026</th></tr></table>")
-
-
 # next draw pages
 
 
@@ -388,19 +311,12 @@ def test_toto_next_draw_fixture(fixture_html):
     assert "Next Jackpot" in info["raw_text"] and "3,500,000" not in info["raw_text"]
 
 
-def test_fourd_next_draw_fixture(fixture_html):
-    info = P.parse_fourd_next_draw(fixture_html("fourd_next_draw.html"))
-    assert info["draw_datetime"] == datetime(2026, 10, 3, 18, 30, tzinfo=SG)
-    assert "Next Draw" in info["raw_text"]
-
-
 @pytest.mark.parametrize("style", ["dot", "colon", "upper"])
 def test_next_draw_time_styles(style):
     dt = datetime(2026, 10, 5, 18, 30, tzinfo=SG)
     info = P.parse_toto_next_draw(H.toto_next_draw_html(dt, 3_500_000, time_style=style))
     assert info["draw_datetime"] == dt
     assert info["jackpot_estimate"] == 3_500_000
-    assert P.parse_fourd_next_draw(H.fourd_next_draw_html(dt, time_style=style))["draw_datetime"] == dt
 
 
 @pytest.mark.parametrize("snippet, expected", [
@@ -411,7 +327,7 @@ def test_next_draw_time_styles(style):
     ("Next Draw Thu, 08 Oct 2026 , 12.15am", time(0, 15)),
 ])
 def test_next_draw_time_text(snippet, expected):
-    info = P.parse_fourd_next_draw(f"<div><p>{snippet}</p></div>")
+    info = P.parse_toto_next_draw(f"<div><p>{snippet}</p></div>")
     assert info["draw_datetime"] == datetime.combine(date(2026, 10, 8), expected, tzinfo=SG)
 
 
@@ -436,7 +352,9 @@ def test_next_draw_hint_from_htmlgen():
 def test_next_draw_missing_values():
     info = P.parse_toto_next_draw(H.toto_next_draw_html(None, None))
     assert info["draw_datetime"] is None and info["jackpot_estimate"] is None
-    assert P.parse_fourd_next_draw("")["draw_datetime"] is None
+    empty = P.parse_toto_next_draw("")
+    assert empty["draw_datetime"] is None and empty["jackpot_estimate"] is None
+    assert empty["draw_type_hint"] is None and empty["raw_text"] == ""
 
 
 def test_next_draw_million_and_label_preference():
@@ -516,49 +434,6 @@ def test_toto_prize_structure_implausible_minimum_is_not_used():
     assert P.parse_toto_prize_structure(html)["min_group1"] is None
 
 
-def test_fourd_prize_structure_fixture(fixture_html):
-    r = P.parse_fourd_prize_structure(fixture_html("fourd_prize_structure.html"))
-    assert r["big"] == C.FOURD_PRIZES["big"]
-    assert r["small"] == C.FOURD_PRIZES["small"]
-    assert set(r["ibet"]) == {"big"}
-    assert r["ibet"]["big"][24] == {"first": 83.0, "second": 41.0, "third": 20.0, "starter": 10.0, "consolation": 2.0}
-    assert r["ibet"]["big"][4]["first"] == 500.0
-
-
-def test_fourd_prize_structure_htmlgen_separate_tables():
-    r = P.parse_fourd_prize_structure(H.fourd_prize_structure_html())
-    assert r["big"] == C.FOURD_PRIZES["big"]
-    assert r["small"] == C.FOURD_PRIZES["small"]
-    for bet in ("big", "small"):
-        for perms in (24, 12, 6, 4):
-            expected = {t: float(math.floor(v / perms)) for t, v in C.FOURD_PRIZES[bet].items()}
-            assert r["ibet"][bet][perms] == expected
-    no_ibet = P.parse_fourd_prize_structure(H.fourd_prize_structure_html(ibet=False))
-    assert "ibet" not in no_ibet
-
-
-def test_fourd_prize_structure_reads_changed_values():
-    big = {"first": 2500.0, "second": 1000.0, "third": 500.0, "starter": 250.0, "consolation": 60.0}
-    r = P.parse_fourd_prize_structure(H.fourd_prize_structure_html(big=big, ibet=False))
-    assert r["big"] == big
-
-
-def test_fourd_prize_structure_text_fallback():
-    html = """<div><h2>Big Forecast</h2><p>1st Prize $2,000 2nd Prize $1,000 3rd Prize $490
-      Starter Prizes $250 Consolation Prizes $60</p>
-      <h2>Small Forecast</h2><p>1st Prize $3,000, 2nd Prize $2,000, 3rd Prize $800</p>
-      <h2>iBet Big</h2><p>1st Prize $83 2nd Prize $41</p></div>"""
-    r = P.parse_fourd_prize_structure(html)
-    assert r["big"] == C.FOURD_PRIZES["big"] and r["small"] == C.FOURD_PRIZES["small"]
-
-
-def test_fourd_prize_structure_missing_or_js_is_none():
-    assert P.parse_fourd_prize_structure(H.fourd_prize_structure_html(rendered=False)) is None
-    assert P.parse_fourd_prize_structure("") is None
-    only_big = "<h2>Big</h2><table><tr><td>1st Prize</td><td>$2,000</td></tr><tr><td>2nd Prize</td><td>$1,000</td></tr></table>"
-    assert P.parse_fourd_prize_structure(only_big) is None
-
-
 def test_page_text_drops_scripts_and_styles():
     text = P.page_text("<html><head><title>T</title><script>var x='$1';</script></head>"
                        "<body><style>p{}</style><p>Hello\n  world</p></body></html>")
@@ -571,16 +446,33 @@ def test_next_draw_impossible_date_is_none():
 
 
 def test_check_site_fails_when_the_result_layout_changes():
-    """A renamed shares table or prize section must make check site FAIL, not PASS with 0 groups."""
+    """A renamed shares table must make check site FAIL, not PASS with 0 groups."""
     from huatbot.fetch import check_site
 
-    site = H.fake_site(synth_toto(n_draws=20), synth_fourd(n_draws=20))
+    site = H.fake_site(synth_toto(n_draws=20))
     assert check_site(site, out=lambda s: None) is True
     for url, html in list(site.pages.items()):
         if isinstance(html, str):
-            site.pages[url] = (html.replace("tableWinningShares", "tableSomethingElse")
-                               .replace("tbodyStarterPrizes", "tbodySomethingElse"))
+            site.pages[url] = html.replace("tableWinningShares", "tableSomethingElse")
     lines: list[str] = []
     assert check_site(site, out=lines.append) is False
     assert any(line.startswith("FAIL  TOTO latest result page") and "winning shares" in line for line in lines)
-    assert any(line.startswith("FAIL  4D latest result page") and "starter" in line for line in lines)
+
+
+# TOTO only
+
+
+def test_parse_has_no_fourd_parsers():
+    for name in ("parse_fourd_result", "parse_fourd_next_draw", "parse_fourd_prize_structure"):
+        assert not hasattr(P, name), name
+
+
+def test_prize_structure_ignores_scripts_and_head_like_page_text():
+    # figures that only appear in scripts, styles or the head must not count (same rule as page_text)
+    rows = "".join(f"<tr><td>Group {g}</td><td>{v}% of Prize Pool</td></tr>"
+                   for g, v in ((1, 38), (2, 8), (3, 5.5), (4, 3)))
+    hidden = (f"<html><head><title>Group 1 99%</title><script>var t = '<table>{rows}</table>';</script></head>"
+              "<body><div id='root'></div></body></html>")
+    assert P.parse_toto_prize_structure(hidden) is None
+    shown = hidden.replace("<div id='root'></div>", f"<table>{rows}</table>")
+    assert P.parse_toto_prize_structure(shown)["group_pool_pct"] == {1: 0.38, 2: 0.08, 3: 0.055, 4: 0.03}

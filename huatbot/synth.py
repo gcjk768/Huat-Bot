@@ -1,4 +1,4 @@
-"""Synthetic but internally consistent TOTO and 4D history.
+"""Synthetic but internally consistent TOTO history.
 
 Used by the tests and by ``python -m huatbot demo`` so the whole pipeline can run
 without reaching the Singapore Pools site. The TOTO model plants a known crowd
@@ -13,8 +13,8 @@ import numpy as np
 import pandas as pd
 
 from . import constants as C
-from .models import NextFourD, NextToto
-from .store import normalise_fourd, normalise_toto
+from .models import NextToto
+from .store import normalise_toto
 
 SG = ZoneInfo(C.SG_TZ_NAME)
 
@@ -127,25 +127,6 @@ def synth_toto(
     return normalise_toto(pd.DataFrame(rows))
 
 
-def synth_fourd(
-    n_draws: int = 400,
-    start_draw: int = 5000,
-    start_date: date = date(2022, 1, 5),
-    seed: int = 11,
-) -> pd.DataFrame:
-    rng = np.random.default_rng(seed)
-    rows = []
-    for i, d in enumerate(draw_dates(start_date, C.FOURD_WEEKDAYS, n_draws)):
-        picks = [f"{int(x):04d}" for x in rng.choice(C.FOURD_SPACE, size=23, replace=False)]
-        row = {"draw_number": start_draw + i, "draw_date": pd.Timestamp(d), "fetched_at": "synthetic",
-               "first": picks[0], "second": picks[1], "third": picks[2]}
-        for k in range(10):
-            row[f"starter_{k + 1}"] = picks[3 + k]
-            row[f"consolation_{k + 1}"] = picks[13 + k]
-        rows.append(row)
-    return normalise_fourd(pd.DataFrame(rows))
-
-
 def _next_date(last: date, weekdays: tuple[int, ...]) -> date:
     d = last + timedelta(days=1)
     while d.weekday() not in weekdays:
@@ -173,10 +154,3 @@ def synth_next_toto(df: pd.DataFrame) -> NextToto:
         draw_type_hint=None,
         raw_text=f"Next Jackpot ${jackpot:,.0f} est Next Draw {d:%a, %d %b %Y} , 6.30pm",
     )
-
-
-def synth_next_fourd(df: pd.DataFrame) -> NextFourD:
-    last = df.iloc[-1]["draw_date"].date()
-    d = _next_date(last, C.FOURD_WEEKDAYS)
-    return NextFourD(draw_datetime=datetime.combine(d, C.DRAW_TIME, tzinfo=SG),
-                     raw_text=f"Next Draw {d:%a, %d %b %Y} , 6.30pm")

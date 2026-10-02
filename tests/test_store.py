@@ -1,4 +1,4 @@
-"""CSV store: round trips keep dtypes, 4D leading zeros and NaN shares; writes are atomic and readable."""
+"""CSV store: round trips keep dtypes and NaN shares; writes are atomic and readable."""
 from __future__ import annotations
 
 import os
@@ -7,7 +7,7 @@ import stat
 import numpy as np
 
 from huatbot import store
-from huatbot.synth import synth_fourd, synth_toto
+from huatbot.synth import synth_toto
 
 
 def test_toto_round_trip(tmp_path):
@@ -22,19 +22,8 @@ def test_toto_round_trip(tmp_path):
         assert np.array_equal(np.isnan(back[col]), np.isnan(df[col]))
 
 
-def test_fourd_keeps_leading_zeros(tmp_path):
-    df = synth_fourd(n_draws=40)
-    df.loc[0, "first"] = "0042"
-    path = tmp_path / "fourd.csv"
-    store.save_fourd(df, path)
-    back = store.load_fourd(path)
-    assert back.loc[0, "first"] == "0042"
-    assert all(len(n) == 4 for n in back["consolation_10"])
-
-
 def test_missing_file_gives_empty_frames(tmp_path):
     assert store.load_toto(tmp_path / "nope.csv").empty
-    assert store.load_fourd(tmp_path / "nope.csv").empty
     assert store.load_ledger(tmp_path / "nope.csv").empty
 
 

@@ -1,29 +1,29 @@
-"""Render toto.csv / fourd.csv rows into Singapore Pools style HTML, plus a fake fetcher.
+"""Render toto.csv rows into Singapore Pools style HTML, plus a fake fetcher.
 
 The pages use the selectors verified on the live site (th.drawDate, th.drawNumber,
-td.win1..6, td.additional, td.jackpotPrize, table.tableWinningShares, td.tdFirstPrize,
-tbody.tbodyStarterPrizes, ...) wrapped in realistic noise: a head with scripts, a nav,
-unrelated tables, decoy classes and newlines inside cells. Parsers that pass on these
-pages are selector based, not position based.
+td.win1..6, td.additional, td.jackpotPrize, table.tableWinningShares) wrapped in
+realistic noise: a head with scripts, a nav, unrelated tables, decoy classes and
+newlines inside cells. Parsers that pass on these pages are selector based, not
+position based.
 
 Public API (also used by the integration tests):
-    toto_result_html(row), fourd_result_html(row)
+    toto_result_html(row)
     draw_list_html(rows_or_pairs), draw_type_list_html(draw_numbers)
-    toto_next_draw_html(dt, jackpot, hint=None), fourd_next_draw_html(dt)
-    toto_prize_structure_html(rendered=True), fourd_prize_structure_html(rendered=True)
-    FakeFetcher(pages), fake_site(toto_df, fourd_df, ...)
+    toto_next_draw_html(dt, jackpot, hint=None)
+    toto_prize_structure_html(rendered=True)
+    FakeFetcher(pages), fake_site(toto_df, next_toto=..., cascade=..., ...)
 """
 from __future__ import annotations
 
-import math
 import threading
+from collections.abc import Iterable, Mapping
 from datetime import datetime
-from typing import Any, Iterable, Mapping
+from typing import Any
 
 import pandas as pd
 
 from huatbot import constants as C
-from huatbot.fetch import fourd_result_url, toto_result_url
+from huatbot.fetch import toto_result_url
 from huatbot.http import FetchError
 from huatbot.parse import sppl
 
@@ -38,7 +38,7 @@ def date_text(value: Any) -> str:
 
 def money_text(value: Any) -> str:
     """"$1,185,926" (cents only when needed); NaN or None -> "-"."""
-    if value is None or (isinstance(value, float) and math.isnan(value)) or pd.isna(value):
+    if value is None or pd.isna(value):
         return "-"
     x = float(value)
     return f"${x:,.0f}" if x.is_integer() else f"${x:,.2f}"
@@ -48,10 +48,6 @@ def count_text(value: Any) -> str:
     """Number of winning shares; 0 is shown as "-" like the site does."""
     n = int(value or 0)
     return "-" if n == 0 else f"{n:,}"
-
-
-def _get(row: Any, key: str) -> Any:
-    return row[key]
 
 
 # page wrapper with noise
@@ -69,7 +65,7 @@ _HEAD = """<!DOCTYPE html>
     var jackpotBanner = "$9,999,999";
     window.dataLayer = window.dataLayer || [];
   </script>
-  <style>.win1 {{ color: red; }} td.tdFirstPrize {{ font-weight: bold; }}</style>
+  <style>.win1 {{ color: red; }} td.jackpotPrize {{ font-weight: bold; }}</style>
 </head>
 <body class="ms-backgroundImage">
   <form method="post" action="./results.aspx" id="aspnetForm">
@@ -113,14 +109,14 @@ def _page(title: str, body: str) -> str:
 
 def toto_result_html(row: Mapping | pd.Series) -> str:
     """A TOTO result page for one toto.csv row."""
-    draw = int(_get(row, "draw_number"))
-    nums = [int(_get(row, f"n{i}")) for i in range(1, 7)]
+    draw = int(row["draw_number"])
+    nums = [int(row[f"n{i}"]) for i in range(1, 7)]
     win_cells = "\n".join(
         f"          <td class='win{i}'>\n            {n}\n          </td>" for i, n in enumerate(nums, start=1)
     )
     share_rows = "\n".join(
-        f"        <tr>\n          <td>Group {g}</td>\n          <td>{money_text(_get(row, f'g{g}_share'))}</td>\n"
-        f"          <td> {count_text(_get(row, f'g{g}_winners'))} </td>\n        </tr>"
+        f"        <tr>\n          <td>Group {g}</td>\n          <td>{money_text(row[f'g{g}_share'])}</td>\n"
+        f"          <td> {count_text(row[f'g{g}_winners'])} </td>\n        </tr>"
         for g in range(1, 8)
     )
     body = f"""
@@ -129,7 +125,7 @@ def toto_result_html(row: Mapping | pd.Series) -> str:
         <thead>
           <tr>
             <th class='drawDate'>
-              {date_text(_get(row, 'draw_date'))}
+              {date_text(row['draw_date'])}
             </th>
             <th class='drawNumber'>Draw No. {draw}</th>
           </tr>
@@ -145,11 +141,11 @@ def toto_result_html(row: Mapping | pd.Series) -> str:
       </table>
       <table class='table table-striped'>
         <thead><tr><th>Additional Number</th></tr></thead>
-        <tbody><tr><td class='additional'> {int(_get(row, 'additional'))} </td></tr></tbody>
+        <tbody><tr><td class='additional'> {int(row['additional'])} </td></tr></tbody>
       </table>
       <table class='table table-striped jackpotPrizeTable'>
         <thead><tr><th>Group 1 Prize</th></tr></thead>
-        <tbody><tr><td class='jackpotPrize'>{money_text(_get(row, 'jackpot'))}</td></tr></tbody>
+        <tbody><tr><td class='jackpotPrize'>{money_text(row['jackpot'])}</td></tr></tbody>
       </table>
       <table class='table table-striped tableWinningShares'>
         <thead><tr><th colspan='3'>Winning Shares</th></tr></thead>
@@ -166,62 +162,6 @@ def toto_result_html(row: Mapping | pd.Series) -> str:
     <table class="table recent"><tr><td>Group 2</td><td>$88,888</td><td>7</td></tr></table>
 """
     return _page("TOTO Results", body)
-
-
-def _fourd_cell(value: Any) -> str:
-    s = "" if value is None or (isinstance(value, float) and math.isnan(value)) else str(value)
-    return s if s else "-"
-
-
-def fourd_result_html(row: Mapping | pd.Series) -> str:
-    """A 4D result page for one fourd.csv row."""
-    draw = int(_get(row, "draw_number"))
-
-    def five_by_two(prefix: str) -> str:
-        values = [_fourd_cell(_get(row, f"{prefix}_{i}")) for i in range(1, 11)]
-        lines = []
-        for start in (0, 5):
-            cells = "".join(f"\n            <td>{v}</td>" for v in values[start:start + 5])
-            lines.append(f"          <tr>{cells}\n          </tr>")
-        return "\n".join(lines)
-
-    body = f"""
-    <div class="divFourDResults">
-      <table class='table table-striped orange-header'>
-        <thead>
-          <tr>
-            <th class='drawDate'>{date_text(_get(row, 'draw_date'))}</th>
-            <th class='drawNumber'>
-              Draw No. {draw}
-            </th>
-          </tr>
-        </thead>
-      </table>
-      <table class='table table-striped orange-header'>
-        <tbody>
-          <tr><th>1st Prize</th><td class='tdFirstPrize'>
-            {_fourd_cell(_get(row, 'first'))}
-          </td></tr>
-          <tr><th>2nd Prize</th><td class='tdSecondPrize'>{_fourd_cell(_get(row, 'second'))}</td></tr>
-          <tr><th>3rd Prize</th><td class='tdThirdPrize'>{_fourd_cell(_get(row, 'third'))}</td></tr>
-        </tbody>
-      </table>
-      <table class='table table-striped orange-header'>
-        <thead><tr><th colspan='5'>Starter Prizes</th></tr></thead>
-        <tbody class='tbodyStarterPrizes'>
-{five_by_two('starter')}
-        </tbody>
-      </table>
-      <table class='table table-striped orange-header'>
-        <thead><tr><th colspan='5'>Consolation Prizes</th></tr></thead>
-        <tbody class='tbodyConsolationPrizes'>
-{five_by_two('consolation')}
-        </tbody>
-      </table>
-    </div>
-    <table class="table hot-numbers"><tbody><tr><td>9999</td><td>8888</td></tr></tbody></table>
-"""
-    return _page("4D Results", body)
 
 
 # draw lists
@@ -314,23 +254,7 @@ def toto_next_draw_html(dt: Any, jackpot: float | None, hint: str | None = None,
 """
 
 
-def fourd_next_draw_html(dt: Any, time_style: str = "dot") -> str:
-    """The 4D next draw info fragment."""
-    return f"""<div class='divFourDNextDraw'>
-  <script type='text/javascript'>var lastDraw = 'Sun, 01 Jan 2023';</script>
-  <div class='row'>
-    <div class='col-xs-12'><p class='text-center'>Next Draw</p></div>
-    <div class='col-xs-12'>
-      <p class='four-d-draw-date'>
-        {_when_text(dt, time_style)}
-      </p>
-    </div>
-  </div>
-</div>
-"""
-
-
-# prize structure pages (online2)
+# prize structure page (online2)
 
 _JS_SHELL = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><title>{title} | Singapore Pools</title>
@@ -343,7 +267,8 @@ _JS_SHELL = """<!DOCTYPE html>
 
 def toto_prize_structure_html(rendered: bool = True, group_pool_pct: Mapping[int, float] | None = None,
                               fixed_prizes: Mapping[int, float] | None = None,
-                              pool_share: float | None = C.TOTO_POOL_SHARE_OF_SALES) -> str:
+                              pool_share: float | None = C.TOTO_POOL_SHARE_OF_SALES,
+                              min_group1: float = C.TOTO_MIN_GROUP1) -> str:
     """The TOTO prize structure page. rendered=False gives the JavaScript shell with no figures."""
     if not rendered:
         return _JS_SHELL.format(title="TOTO Prize Structure", slug="toto-prize-structure")
@@ -357,7 +282,7 @@ def toto_prize_structure_html(rendered: bool = True, group_pool_pct: Mapping[int
         if g in pct:
             text = f"{pct[g] * 100:g}% of Prize Pool"
             if g == 1:
-                text += f" (minimum {money_text(C.TOTO_MIN_GROUP1)})"
+                text += f" (minimum {money_text(min_group1)})"
             return text
         return f"{money_text(fixed[g])} per winning combination"
 
@@ -379,50 +304,6 @@ def toto_prize_structure_html(rendered: bool = True, group_pool_pct: Mapping[int
     <p>Group 1 prize snowballs up to 4 draws if there is no winner.</p>
 """
     return _page("TOTO Prize Structure", body)
-
-
-def fourd_prize_structure_html(rendered: bool = True, big: Mapping[str, float] | None = None,
-                               small: Mapping[str, float] | None = None, ibet: bool = True) -> str:
-    """The 4D prize structure page with Big, Small and (optionally) iBet tables."""
-    if not rendered:
-        return _JS_SHELL.format(title="4D Prize Structure", slug="4d-prize-structure")
-    big = dict(C.FOURD_PRIZES["big"] if big is None else big)
-    small = dict(C.FOURD_PRIZES["small"] if small is None else small)
-    labels = {"first": "1st Prize", "second": "2nd Prize", "third": "3rd Prize",
-              "starter": "Starter Prizes", "consolation": "Consolation Prizes"}
-
-    def straight(title: str, table: Mapping[str, float]) -> str:
-        rows = "\n".join(f"      <tr><td>{labels[t]}</td><td>{money_text(v)}</td></tr>" for t, v in table.items())
-        return f"""
-    <h3>{title}</h3>
-    <table class="prize-table">
-      <thead><tr><th>Prize Category</th><th>Prize Amount for every $1 bet</th></tr></thead>
-      <tbody>
-{rows}
-      </tbody>
-    </table>"""
-
-    def ibet_table(title: str, table: Mapping[str, float]) -> str:
-        perms = (24, 12, 6, 4)
-        head = "".join(f"<th>{p} Permutations</th>" for p in perms)
-        rows = "\n".join(
-            f"      <tr><td>{labels[t]}</td>" + "".join(f"<td>{money_text(math.floor(v / p))}</td>" for p in perms)
-            + "</tr>" for t, v in table.items()
-        )
-        return f"""
-    <h3>{title}</h3>
-    <table class="prize-table">
-      <thead><tr><th>Prize Category</th>{head}</tr></thead>
-      <tbody>
-{rows}
-      </tbody>
-    </table>"""
-
-    body = "\n    <h1>4D Prize Structure</h1>\n    <p>There are two bet types, Big and Small.</p>"
-    body += straight("Big Forecast", big) + straight("Small Forecast", small)
-    if ibet:
-        body += ibet_table("iBet Big", big) + ibet_table("iBet Small", small)
-    return _page("4D Prize Structure", body + "\n")
 
 
 # fake fetcher
@@ -470,52 +351,38 @@ class FakeFetcher:
 
 def fake_site(
     toto_df: pd.DataFrame | None = None,
-    fourd_df: pd.DataFrame | None = None,
     *,
     next_toto: Any = None,
-    next_fourd: Any = None,
     cascade: Iterable[int] | None = None,
     hongbao: Iterable[int] | None = None,
     special: Iterable[int] | None = None,
     list_size: int = 150,
     prize_pages: str | None = "rendered",
 ) -> FakeFetcher:
-    """A FakeFetcher serving the whole site for the given history.
+    """A FakeFetcher serving the whole TOTO site for the given history.
 
-    Every row gets a result page; the draw lists hold the newest ``list_size`` draws.
-    Draw type lists default to the draw_type column of ``toto_df``. Next draw pages
-    come from ``next_toto`` / ``next_fourd`` (models.NextToto / NextFourD) or from
-    huatbot.synth when omitted. ``prize_pages``: "rendered", "js" (JavaScript shell)
-    or None (pages missing).
+    Every row gets a result page; the draw list holds the newest ``list_size`` draws.
+    Draw type lists default to the draw_type column of ``toto_df``. The next draw page
+    comes from ``next_toto`` (models.NextToto) or from huatbot.synth when omitted.
+    ``prize_pages``: "rendered", "js" (JavaScript shell) or None (page missing).
     """
-    from huatbot.synth import synth_next_fourd, synth_next_toto
+    from huatbot.synth import synth_next_toto
 
     pages: dict[str, Any] = {}
     if toto_df is not None and len(toto_df):
         for _, row in toto_df.iterrows():
             pages[toto_result_url(int(row["draw_number"]))] = toto_result_html(row)
         pages[C.TOTO_DRAW_LIST_URL] = draw_list_html(toto_df.sort_values("draw_number").tail(list_size))
+        dates = dict(zip(toto_df["draw_number"].astype(int), toto_df["draw_date"]))
         for name, given, url in (("cascade", cascade, C.TOTO_CASCADE_LIST_URL),
                                  ("hongbao", hongbao, C.TOTO_HONGBAO_LIST_URL),
                                  ("special", special, C.TOTO_SPECIAL_LIST_URL)):
             if given is None:
-                sub = toto_df[toto_df["draw_type"] == name]
-                items = list(zip(sub["draw_number"].astype(int), sub["draw_date"]))
-            else:
-                dates = dict(zip(toto_df["draw_number"].astype(int), toto_df["draw_date"]))
-                items = [(int(n), dates.get(int(n))) for n in given]
-            pages[url] = draw_type_list_html(items)
+                given = toto_df.loc[toto_df["draw_type"] == name, "draw_number"]
+            pages[url] = draw_type_list_html([(int(n), dates.get(int(n))) for n in given])
         nt = next_toto if next_toto is not None else synth_next_toto(toto_df)
         pages[C.TOTO_NEXT_DRAW_URL] = toto_next_draw_html(nt.draw_datetime, nt.jackpot_estimate,
                                                           getattr(nt, "draw_type_hint", None))
-    if fourd_df is not None and len(fourd_df):
-        for _, row in fourd_df.iterrows():
-            pages[fourd_result_url(int(row["draw_number"]))] = fourd_result_html(row)
-        pages[C.FOURD_DRAW_LIST_URL] = draw_list_html(fourd_df.sort_values("draw_number").tail(list_size))
-        nf = next_fourd if next_fourd is not None else synth_next_fourd(fourd_df)
-        pages[C.FOURD_NEXT_DRAW_URL] = fourd_next_draw_html(nf.draw_datetime)
     if prize_pages:
-        rendered = prize_pages == "rendered"
-        pages[C.TOTO_PRIZE_RULES_URL] = toto_prize_structure_html(rendered=rendered)
-        pages[C.FOURD_PRIZE_RULES_URL] = fourd_prize_structure_html(rendered=rendered)
+        pages[C.TOTO_PRIZE_RULES_URL] = toto_prize_structure_html(rendered=prize_pages == "rendered")
     return FakeFetcher(pages)

@@ -12,7 +12,7 @@ import pytest
 
 from huatbot import buysignal as B
 from huatbot import constants as C
-from huatbot.analysis_toto import crowd_table
+from huatbot.sales import sales_table as crowd_table
 from huatbot.models import NextToto, Settings
 from huatbot.store import no_winner_streak, normalise_toto
 
@@ -233,7 +233,7 @@ def test_an_average_above_one_dollar_carries_a_caveat(toto_df, settings, rules):
     assert sig.ev_per_dollar > 1
     assert "almost every ticket still loses" in sig.reason
     assert f"7 boards in {C.TOTO_COMBOS:,} can win" in sig.reason  # Group 1 plus the 6 Group 2 boards
-    assert "above your budget" in sig.reason
+    assert "more than you planned" in sig.reason
     assert sig.reason.endswith(".") and not re.search(r"\.\s", sig.reason)  # one sentence
     assert not DASHES.search(sig.reason)
     # A normal draw at $2.1M averages well under $1: no caveat.

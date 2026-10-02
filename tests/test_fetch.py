@@ -1,6 +1,7 @@
 """fetch.py against a fake site built from synthetic history and the static fixtures."""
 from __future__ import annotations
 
+import inspect
 import math
 import re
 from datetime import date, datetime, timedelta
@@ -11,8 +12,8 @@ import pytest
 from huatbot import constants as C
 from huatbot import fetch as F
 from huatbot.http import FetchError
-from huatbot.models import FOURD_NUMBER_COLUMNS, NextToto
-from huatbot.store import empty_fourd, empty_toto
+from huatbot.models import NextToto
+from huatbot.store import empty_toto
 from huatbot.synth import SG, synth_toto
 from tests import htmlgen as H
 from tests.conftest import FIXTURES
@@ -40,9 +41,8 @@ def assert_same_results(got: pd.DataFrame, expected: pd.DataFrame, cols):
         pd.testing.assert_series_equal(got[col], expected[col], check_names=False, check_dtype=False)
 
 
-def result_urls(fetcher: H.FakeFetcher, game: str = "toto") -> list[str]:
-    marker = "toto_results.aspx" if game == "toto" else "4d_results.aspx"
-    return [u for u in fetcher.requested if marker in u]
+def result_urls(fetcher: H.FakeFetcher) -> list[str]:
+    return [u for u in fetcher.requested if "toto_results.aspx" in u]
 
 
 def static_site() -> H.FakeFetcher:
@@ -50,17 +50,13 @@ def static_site() -> H.FakeFetcher:
     read = lambda name: (FIXTURES / name).read_text(encoding="utf-8")  # noqa: E731
     return H.FakeFetcher({
         C.TOTO_DRAW_LIST_URL: read("toto_draw_list.html"),
-        C.FOURD_DRAW_LIST_URL: read("fourd_draw_list.html"),
         F.toto_result_url(4123): read("toto_result_with_winner.html"),
         F.toto_result_url(4122): read("toto_result_no_winner.html"),
-        F.fourd_result_url(5432): read("fourd_result.html"),
         C.TOTO_NEXT_DRAW_URL: read("toto_next_draw.html"),
-        C.FOURD_NEXT_DRAW_URL: read("fourd_next_draw.html"),
         C.TOTO_CASCADE_LIST_URL: read("toto_cascade_list.html"),
         C.TOTO_HONGBAO_LIST_URL: H.draw_type_list_html([]),
         C.TOTO_SPECIAL_LIST_URL: H.draw_type_list_html([]),
         C.TOTO_PRIZE_RULES_URL: read("toto_prize_structure.html"),
-        C.FOURD_PRIZE_RULES_URL: read("fourd_prize_structure.html"),
     })
 
 
@@ -70,8 +66,6 @@ def static_site() -> H.FakeFetcher:
 def test_result_urls():
     assert F.toto_result_url(4123) == (
         "https://www.singaporepools.com.sg/en/product/sr/Pages/toto_results.aspx?sppl=RHJhd051bWJlcj00MTIz")
-    assert F.fourd_result_url(5432) == (
-        "https://www.singaporepools.com.sg/en/product/Pages/4d_results.aspx?sppl=RHJhd051bWJlcj01NDMy")
 
 
 # draw types
@@ -230,6 +224,32 @@ def test_update_toto_summarises_many_failures(toto_df):
     assert sum("draw list could not be used" in m for m in res.messages) == 3
 
 
+def test_update_toto_messages_singular_and_plural(toto_df):
+    latest = int(toto_df["draw_number"].max())
+    site = H.fake_site(toto_df)
+    _, res = F.update_toto(site, toto_df.iloc[:-2], start_draw=int(toto_df["draw_number"].min()),
+                           skip={latest - 1}, now=NOW)
+    assert "TOTO: 1 new draw added (%d)." % latest in res.messages
+    assert "TOTO: 1 draw left out because it is on the skip list (%d)." % (latest - 1) in res.messages
+
+    # 11 failures: 10 named, then "1 more draw" (not "1 more draws")
+    site = H.FakeFetcher({C.TOTO_DRAW_LIST_URL: H.draw_list_html(toto_df.tail(3))})
+    _, res = F.update_toto(site, empty_toto(), start_draw=latest - 10, now=NOW)
+    assert f"TOTO: 1 more draw could not be added ({latest})." in res.messages
+    assert_no_dashes(res.messages)
+
+
+def test_update_toto_accepts_none_and_a_draw_list_without_dates(toto_df):
+    latest = int(toto_df["draw_number"].max())
+    site = H.fake_site(toto_df)
+    site.pages[C.TOTO_DRAW_LIST_URL] = H.draw_list_html(list(toto_df["draw_number"].tail(5)))  # no dates
+    df, res = F.update_toto(site, None, start_draw=latest - 2, now=NOW)
+    assert res.new_draws == [latest - 2, latest - 1, latest] and res.verified
+    assert f"TOTO: the latest draw on the site is {latest}." in res.messages
+    assert res.game == "toto" and res.repaired_draws == []
+    assert not any("4d" in u.lower() or "fourd" in u for u in site.requested)
+
+
 def test_update_toto_draw_list_failure_raises(toto_df):
     with pytest.raises(FetchError):
         F.update_toto(H.FakeFetcher({}), toto_df, start_draw=1, now=NOW)
@@ -273,63 +293,19 @@ def test_update_toto_with_static_fixtures():
     assert set(df["draw_type"]) == {"normal"}
 
 
-# update_fourd
+# next draw
 
 
-def test_update_fourd_fills_the_window(fourd_df):
-    site = H.fake_site(fourd_df=fourd_df)
-    df, res = F.update_fourd(site, empty_fourd(), history_draws=30, now=NOW)
-    latest = int(fourd_df["draw_number"].max())
-    assert res.new_draws == list(range(latest - 29, latest + 1))
-    assert res.verified and res.game == "4d"
-    assert_same_results(df, fourd_df.tail(30).reset_index(drop=True), ["draw_date"] + FOURD_NUMBER_COLUMNS)
-    assert_no_dashes(res.messages)
-
-
-def test_update_fourd_keeps_existing_rows_and_fetches_only_missing(fourd_df):
-    site = H.fake_site(fourd_df=fourd_df)
-    old = fourd_df.iloc[:100]  # far outside the window, must be kept
-    recent = fourd_df.iloc[-50:-3]
-    local = pd.concat([old, recent], ignore_index=True)
-    df, res = F.update_fourd(site, local, history_draws=50, now=NOW)
-    assert res.new_draws == list(fourd_df["draw_number"].iloc[-3:])
-    assert len(result_urls(site, "4d")) == 3
-    assert len(df) == 100 + 50
-    assert set(old["draw_number"]) <= set(df["draw_number"])
-    assert res.verified
-
-
-def test_update_fourd_skip_and_failures(fourd_df):
-    site = H.fake_site(fourd_df=fourd_df)
-    latest = int(fourd_df["draw_number"].max())
-    del site.pages[F.fourd_result_url(latest)]
-    df, res = F.update_fourd(site, fourd_df.iloc[:-4], history_draws=100, skip={latest - 1}, now=NOW)
-    assert res.new_draws == [latest - 3, latest - 2]
-    assert res.failed_draws == [latest]
-    assert res.verified is False and res.latest_in_csv == latest - 2
-    assert_no_dashes(res.messages)
-
-
-def test_update_fourd_with_static_fixtures():
-    site = static_site()
-    df, res = F.update_fourd(site, empty_fourd(), history_draws=1, now=NOW)
-    assert res.new_draws == [5432] and res.verified
-    row = df.iloc[0]
-    assert row["first"] == "0417" and row["starter_6"] == "0038"
-
-
-# next draws
-
-
-def test_fetch_next_draws_from_pages(toto_df, fourd_df):
+def test_fetch_next_draw_from_page(toto_df):
     dt = datetime(2026, 10, 5, 18, 30, tzinfo=SG)
     nt = NextToto(draw_datetime=dt, jackpot_estimate=4_500_000.0, draw_type="normal", draw_type_hint="hongbao")
-    site = H.fake_site(toto_df, fourd_df, next_toto=nt)
-    t, f = F.fetch_next_draws(site, toto_df)
+    site = H.fake_site(toto_df, next_toto=nt)
+    t = F.fetch_next_draw(site, toto_df)
+    assert isinstance(t, NextToto)
     assert t.draw_datetime == dt and t.jackpot_estimate == 4_500_000.0
     assert t.draw_type == "hongbao" and t.draw_type_hint == "hongbao"
     assert "Next Jackpot" in t.raw_text and len(t.raw_text) <= F.RAW_TEXT_LIMIT
-    assert f.draw_datetime is not None and f.draw_datetime.tzinfo is not None
+    assert site.requested == [C.TOTO_NEXT_DRAW_URL]  # the TOTO page only
 
 
 def _streak_df_ending(winners: list[int], end: date) -> pd.DataFrame:
@@ -349,38 +325,46 @@ def start_dates(end: date, n: int) -> list[date]:
     return days[::-1]
 
 
-def test_fetch_next_draws_predicts_cascade_from_history():
+def test_fetch_next_draw_predicts_cascade_from_history():
     # The stored history ends Thu 1 Oct, the next draw page shows Mon 5 Oct.
     df = _streak_df_ending([1, 0, 0, 0], date(2026, 10, 1))  # 3 snowballs in a row: the next draw is the 4th
     site = static_site()
-    t, f = F.fetch_next_draws(site, df)
+    t = F.fetch_next_draw(site, df)
     assert t.draw_type_hint is None and t.draw_type == "cascade"
     assert t.draw_datetime == datetime(2026, 10, 5, 18, 30, tzinfo=SG)
-    assert f.draw_datetime == datetime(2026, 10, 3, 18, 30, tzinfo=SG)
-    t2, _ = F.fetch_next_draws(site, _streak_df_ending([1, 0, 0], date(2026, 10, 1)))
-    assert t2.draw_type == "normal"
-    t3, _ = F.fetch_next_draws(site, empty_toto())
-    assert t3.draw_type == "normal"
+    assert F.fetch_next_draw(site, _streak_df_ending([1, 0, 0], date(2026, 10, 1))).draw_type == "normal"
+    assert F.fetch_next_draw(site, empty_toto()).draw_type == "normal"
+    assert F.fetch_next_draw(site, None).draw_type == "normal"
 
 
-def test_fetch_next_draws_does_not_predict_a_cascade_from_stale_history():
+def test_fetch_next_draw_does_not_predict_a_cascade_from_stale_history():
     # The stored history ends Mon 28 Sep with 3 snowballs, but Thu 1 Oct was held and is not
     # stored: the Mon 5 Oct draw may be anything, so no cascade (and no HIGH signal) is claimed.
     from huatbot import buysignal
     from huatbot.models import PrizeRules, Settings
 
     df = _streak_df_ending([1, 0, 0, 0], date(2026, 9, 28))
-    t, _ = F.fetch_next_draws(static_site(), df)
+    t = F.fetch_next_draw(static_site(), df)
     assert t.draw_type == "normal" and t.draw_type_hint is None
     signal = buysignal.buy_signal(t, df, Settings(jackpot_alert=1e12), PrizeRules())
     assert signal.draw_type == "normal" and signal.label != "HIGH"
     assert not signal.ev_breakdown.get("cascade")
 
 
-def test_fetch_next_draws_missing_pages():
-    assert F.fetch_next_draws(H.FakeFetcher({}), None) == (None, None)
-    junk = H.FakeFetcher({C.TOTO_NEXT_DRAW_URL: "<p>Coming soon</p>", C.FOURD_NEXT_DRAW_URL: "<p>Coming soon</p>"})
-    assert F.fetch_next_draws(junk, None) == (None, None)
+def test_fetch_next_draw_missing_or_unreadable_page():
+    assert F.fetch_next_draw(H.FakeFetcher({}), None) is None
+    assert F.fetch_next_draw(H.FakeFetcher({C.TOTO_NEXT_DRAW_URL: "<p>Coming soon</p>"}), None) is None
+    assert F.fetch_next_draw(H.FakeFetcher({C.TOTO_NEXT_DRAW_URL: RuntimeError("weird")}), None) is None
+
+
+def test_fetch_next_draw_with_only_a_date_or_only_a_jackpot():
+    dt = datetime(2026, 10, 8, 18, 30, tzinfo=SG)
+    only_date = H.FakeFetcher({C.TOTO_NEXT_DRAW_URL: H.toto_next_draw_html(dt, None)})
+    t = F.fetch_next_draw(only_date, None)
+    assert t.draw_datetime == dt and t.jackpot_estimate is None
+    only_jackpot = H.FakeFetcher({C.TOTO_NEXT_DRAW_URL: H.toto_next_draw_html(None, 2_000_000)})
+    t = F.fetch_next_draw(only_jackpot, None)
+    assert t.draw_datetime is None and t.jackpot_estimate == 2_000_000
 
 
 # latest_on_site
@@ -388,22 +372,31 @@ def test_fetch_next_draws_missing_pages():
 
 def test_latest_on_site():
     site = static_site()
-    assert F.latest_on_site(site, "toto") == (4123, date(2026, 10, 1))
-    assert F.latest_on_site(site, "4d") == (5432, date(2026, 9, 30))
-    assert F.latest_on_site(H.FakeFetcher({}), "toto") == (None, None)
+    assert F.latest_on_site(site) == (4123, date(2026, 10, 1))
+    assert site.requested == [C.TOTO_DRAW_LIST_URL]
+    assert F.latest_on_site(H.FakeFetcher({})) == (None, None)
+    empty = H.FakeFetcher({C.TOTO_DRAW_LIST_URL: "<html><body>Maintenance</body></html>"})
+    assert F.latest_on_site(empty) == (None, None)
+    assert F.latest_on_site(empty, strict=True) == (None, None)  # reachable, just nothing listed
 
 
 # check_site
 
 
-def test_check_site_all_pass_on_fake_site(toto_df, fourd_df):
+def test_check_site_all_pass_on_fake_site(toto_df):
     lines: list[str] = []
-    assert F.check_site(H.fake_site(toto_df, fourd_df), out=lines.append) is True
-    assert len(lines) == 12
-    assert all(line.startswith(("PASS  ", "FAIL  ")) for line in lines[:-1])
-    assert all(line.startswith("PASS") for line in lines[:-1]), lines
-    assert lines[-1].startswith("Summary: all 9 critical checks passed")
+    site = H.fake_site(toto_df)
+    assert F.check_site(site, out=lines.append) is True
+    assert len(lines) == 8
+    assert all(line.startswith("PASS  ") for line in lines[:-1]), lines
+    assert [line.split(":")[0] for line in lines[:-1]] == [
+        "PASS  TOTO draw list", "PASS  TOTO latest result page", "PASS  TOTO next draw page",
+        "PASS  TOTO cascade draw list", "PASS  TOTO Hongbao draw list", "PASS  TOTO special draw list",
+        "PASS  TOTO prize structure page (not critical)",
+    ]
+    assert lines[-1] == "Summary: all 6 critical checks passed."
     assert_no_dashes(lines)
+    assert not any("fourd" in u or "4d" in u for u in site.requested)
 
 
 def test_check_site_static_fixtures():
@@ -412,36 +405,60 @@ def test_check_site_static_fixtures():
     text = "\n".join(lines)
     assert "draw 4123 on Thu 1 Oct 2026, numbers 3 11 19 27 38 45, additional 7" in text
     assert "next draw Mon 5 Oct 2026, 6.30pm, estimated jackpot $1,000,000" in text
-    assert "Group 3 5.5%" in text
-    assert "and iBet tables" in text
+    assert "Group 1 38%, Group 2 8%, Group 3 5.5%, Group 4 3%, Group 5 $50, Group 6 $25, Group 7 $10, " \
+           "prize pool 54% of sales" in text
+    assert "4D" not in text
     assert_no_dashes(lines)
 
 
-def test_check_site_prize_pages_are_not_critical(toto_df, fourd_df):
+@pytest.mark.parametrize("prize_pages", ["js", None])
+def test_check_site_prize_page_is_not_critical(toto_df, prize_pages):
     lines: list[str] = []
-    site = H.fake_site(toto_df, fourd_df, prize_pages="js")
+    site = H.fake_site(toto_df, prize_pages=prize_pages)
     assert F.check_site(site, out=lines.append) is True
     prize = [line for line in lines if "prize structure" in line]
-    assert len(prize) == 2 and all(line.startswith("FAIL") and "(not critical)" in line for line in prize)
-    assert "2 of 2 non critical checks failed" in lines[-1]
+    assert len(prize) == 1 and prize[0].startswith("FAIL") and "(not critical)" in prize[0]
+    assert "built in values will be used" in prize[0]
+    assert lines[-1] == "Summary: all 6 critical checks passed, 1 of 1 non critical checks failed."
     assert_no_dashes(lines)
 
 
-def test_check_site_fails_when_a_result_page_is_missing(toto_df, fourd_df):
-    site = H.fake_site(toto_df, fourd_df)
-    del site.pages[F.toto_result_url(int(toto_df["draw_number"].max()))]
+def test_check_site_fails_when_a_result_page_is_missing(toto_df):
+    site = H.fake_site(toto_df)
+    latest = int(toto_df["draw_number"].max())
+    del site.pages[F.toto_result_url(latest)]
     lines: list[str] = []
     assert F.check_site(site, out=lines.append) is False
-    assert any(line.startswith("FAIL  TOTO latest result page") for line in lines)
-    assert "1 of 9 critical checks failed (TOTO latest result page)" in lines[-1]
+    assert any(line.startswith(f"FAIL  TOTO latest result page: draw {latest}: could not fetch the page")
+               for line in lines)
+    assert lines[-1] == "Summary: 1 of 6 critical checks failed (TOTO latest result page)."
+    assert_no_dashes(lines)
+
+
+def test_check_site_reports_a_wrong_draw_and_a_wrong_date(toto_df):
+    site = H.fake_site(toto_df)
+    latest = int(toto_df["draw_number"].max())
+    site.pages[F.toto_result_url(latest)] = H.toto_result_html(toto_df.iloc[-2])
+    lines: list[str] = []
+    assert F.check_site(site, out=lines.append) is False
+    assert f"asked for draw {latest} but the page shows draw {latest - 1}" in "\n".join(lines)
+
+    site = H.fake_site(toto_df)
+    pairs = list(zip(toto_df["draw_number"].tail(5), toto_df["draw_date"].tail(5)))
+    pairs[-1] = (pairs[-1][0], pairs[-1][1] + pd.Timedelta(days=1))
+    site.pages[C.TOTO_DRAW_LIST_URL] = H.draw_list_html(pairs)
+    lines = []
+    assert F.check_site(site, out=lines.append) is False
+    assert any("on the page but" in line and "on the draw list" in line for line in lines)
     assert_no_dashes(lines)
 
 
 def test_check_site_with_nothing_reachable():
     lines: list[str] = []
     assert F.check_site(H.FakeFetcher({}), out=lines.append) is False
-    assert sum(line.startswith("FAIL") for line in lines) == 11
+    assert sum(line.startswith("FAIL") for line in lines) == 7
     assert any("skipped because the draw list could not be read" in line for line in lines)
+    assert lines[-1].startswith("Summary: 6 of 6 critical checks failed")
     assert_no_dashes(lines)
 
 
@@ -460,7 +477,7 @@ def test_check_site_survives_parser_bugs_and_fetcher_errors(monkeypatch):
 
     lines = []
     assert F.check_site(Exploding(), out=lines.append) is False
-    assert lines[-1].startswith("Summary: 9 of 9 critical checks failed")
+    assert lines[-1].startswith("Summary: 6 of 6 critical checks failed")
     assert_no_dashes(lines)
 
 
@@ -490,17 +507,6 @@ def test_toto_page_without_shares_table_is_not_stored_and_is_fetched_again(toto_
     df2, res2 = F.update_toto(site, df, start_draw=int(toto_df["draw_number"].min()), now=NOW)
     assert res2.new_draws == [latest] and res2.verified
     assert int(df2.set_index("draw_number").loc[latest, "g7_winners"]) > 0
-
-
-def test_fourd_page_with_a_blank_number_is_not_stored(fourd_df):
-    site = H.fake_site(fourd_df=fourd_df)
-    latest = int(fourd_df["draw_number"].max())
-    row = fourd_df.iloc[-1].copy()
-    row["consolation_10"] = ""
-    site.pages[F.fourd_result_url(latest)] = H.fourd_result_html(row)
-    df, res = F.update_fourd(site, fourd_df.iloc[:-1], history_draws=30, now=NOW)
-    assert res.failed_draws == [latest] and latest not in set(df["draw_number"])
-    assert any("not all 23 winning numbers are on the page yet" in m for m in res.messages)
 
 
 def test_incomplete_stored_newest_draw_is_read_again(toto_df):
@@ -545,19 +551,28 @@ def test_only_the_newest_stored_draws_are_rechecked(toto_df):
     assert result_urls(site) == []
 
 
-def test_latest_complete_date_waits_for_the_shares_table(toto_df, fourd_df):
-    site = H.fake_site(toto_df, fourd_df)
+def test_latest_complete_date_waits_for_the_shares_table(toto_df):
+    site = H.fake_site(toto_df)
     latest = int(toto_df["draw_number"].max())
     day = toto_df["draw_date"].iloc[-1].date()
     good = site.pages[F.toto_result_url(latest)]
     site.pages[F.toto_result_url(latest)] = _without_shares(good)
-    assert F.latest_complete_date(site, "toto") is None
+    assert F.latest_complete_date(site) is None
     site.pages[F.toto_result_url(latest)] = good
-    assert F.latest_complete_date(site, "toto") == day
-    assert F.latest_complete_date(site, "4d") == fourd_df["draw_date"].iloc[-1].date()
-    del site.pages[F.fourd_result_url(int(fourd_df["draw_number"].max()))]
-    assert F.latest_complete_date(site, "4d") is None
-    assert F.latest_complete_date(H.FakeFetcher({}), "toto") is None
+    assert F.latest_complete_date(site) == day
+    assert F.latest_complete_date(site, strict=True) == day
+    site.pages[F.toto_result_url(latest)] = H.toto_result_html(toto_df.iloc[-2])  # the wrong draw
+    assert F.latest_complete_date(site) is None
+    del site.pages[F.toto_result_url(latest)]
+    assert F.latest_complete_date(site) is None
+    assert F.latest_complete_date(H.FakeFetcher({})) is None
+
+
+def test_incomplete_reason():
+    assert F.incomplete_reason({"g7_winners": 84113}) is None
+    assert F.incomplete_reason(pd.Series({"g7_winners": 12})) is None
+    for row in ({"g7_winners": 0}, {}, {"g7_winners": None}, {"g7_winners": "x"}):
+        assert F.incomplete_reason(row) == "the winning shares table is not on the page yet"
 
 
 # draw list sanity
@@ -592,9 +607,32 @@ def test_latest_on_site_strict_raises_when_the_site_cannot_be_reached():
         def get(self, url):
             raise FE("site down")
 
-    assert F.latest_on_site(Down(), "toto") == (None, None)
+    assert F.latest_on_site(Down()) == (None, None)
     with pytest.raises(FE):
-        F.latest_on_site(Down(), "toto", strict=True)
+        F.latest_on_site(Down(), strict=True)
     with pytest.raises(FE):
-        F.latest_complete_date(Down(), "4d", strict=True)
-    assert F.latest_complete_date(Down(), "4d") is None
+        F.latest_complete_date(Down(), strict=True)
+    assert F.latest_complete_date(Down()) is None
+
+
+# TOTO only API
+
+
+def test_fetch_has_no_fourd_api():
+    for name in ("fourd_result_url", "update_fourd", "fetch_next_draws", "GAME_LABELS"):
+        assert not hasattr(F, name), name
+
+
+def test_signatures_take_no_game_argument():
+    assert list(inspect.signature(F.latest_on_site).parameters) == ["fetcher", "strict"]
+    assert list(inspect.signature(F.latest_complete_date).parameters) == ["fetcher", "strict"]
+    assert list(inspect.signature(F.incomplete_reason).parameters) == ["row"]
+    assert list(inspect.signature(F.fetch_next_draw).parameters) == ["fetcher", "toto_df"]
+    assert list(inspect.signature(F.update_toto).parameters) == ["fetcher", "df", "start_draw", "skip", "now"]
+    # strict is keyword only, so an old call with a game name fails loudly instead of meaning strict
+    with pytest.raises(TypeError):
+        F.latest_on_site(static_site(), "toto")
+    with pytest.raises(TypeError):
+        F.latest_complete_date(static_site(), "toto", strict=True)
+    with pytest.raises(TypeError):
+        F.incomplete_reason("toto", {"g7_winners": 1})
