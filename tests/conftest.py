@@ -48,3 +48,5 @@ def no_telegram_listener(monkeypatch):
     """serve starts the command listener; tests must never long poll the real Bot API."""
     from huatbot import listener
     monkeypatch.setattr(listener, "start", lambda vault: None)
+    from huatbot import watch
+    monkeypatch.setattr(watch, "start", lambda vault, fetcher: None)

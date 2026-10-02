@@ -14,6 +14,7 @@ Python 3.12, Docker (`docker-compose.yml`, `pull_policy: build`). Runs `python -
 - [[huatbot/report.py]] — full report + 2 Telegram cards (fleet style: `SECTION_TITLES`, divider, expandable blockquote).
 - [[huatbot/telegram.py]] — sendMessage (forum topic via `chat/-topic`), getUpdates, answerCallbackQuery.
 - [[huatbot/listener.py]] — `/huat`, `/huatnext`, `/huathelp` + 🔄/🔮 buttons; own topic only; whitelisted callbacks; no fetch or LLM.
+- [[huatbot/watch.py]] — hourly next draw page check within `ALERT_HOURS` (9-21), 🆕 card on jackpot estimate change or special draw; snapshot in `Data/watch.json`.
 - [[huatbot/commentary.py]] — optional `claude -p --model haiku --no-session-persistence`, numbers validated, vault activity excerpt (≤4k chars) as memory.
 - [[huatbot/vault.py]], [[huatbot/notes.py]] — Obsidian output.
 
