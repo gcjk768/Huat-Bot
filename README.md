@@ -1,16 +1,38 @@
+<div align="center">
+
 # Huat Bot
 
-A Singapore Pools 4D and TOTO analyst that lives on your NAS. It fetches every result, analyses the
-history, suggests numbers that fit your budget, checks your tickets, posts three short messages to
-your Telegram channel on draw days, and keeps everything it reads and writes inside your Obsidian vault.
+**Singapore Pools 4D and TOTO analyst that lives on your NAS**
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/architecture-dark.svg">
-  <img alt="Huat Bot runs in Docker on the NAS, reads Singapore Pools, writes to the Obsidian vault and posts to Telegram" src="docs/diagrams/architecture-light.svg">
-</picture>
+[![Python](https://img.shields.io/badge/Python-3.11%20%7C%203.12-3776AB?logo=python&logoColor=white)](https://www.python.org)
+[![Docker](https://img.shields.io/badge/Docker-compose-2496ED?logo=docker&logoColor=white)](docker-compose.yml)
+[![Telegram](https://img.shields.io/badge/Telegram-3%20messages-26A5E4?logo=telegram&logoColor=white)](#telegram-bot-and-channel)
+[![Obsidian](https://img.shields.io/badge/Obsidian-vault-7C3AED?logo=obsidian&logoColor=white)](#the-vault)
+[![draw.io](https://img.shields.io/badge/diagrams-draw.io-F08705?logo=diagramsdotnet&logoColor=white)](docs/diagrams)
+[![Tests](https://github.com/gcjk768/Huat-Bot/actions/workflows/ci.yml/badge.svg)](https://github.com/gcjk768/Huat-Bot/actions/workflows/ci.yml)
 
-Every figure comes from Python code. If you switch on the optional commentary, Claude only writes a
-short comment about figures the code already computed.
+</div>
+
+It fetches every result, analyses the history, suggests numbers that fit your budget, checks your
+tickets, posts three short messages to your Telegram channel on draw days, and keeps everything it
+reads and writes inside your Obsidian vault.
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/architecture-dark.svg">
+    <img alt="Huat Bot runs in Docker on the NAS, reads Singapore Pools, writes to the Obsidian vault and posts to Telegram" src="docs/diagrams/architecture-light.svg" width="100%">
+  </picture>
+</p>
+
+<p align="center"><sub>Made with draw.io. Edit the source:
+<a href="https://app.diagrams.net/#Uhttps%3A%2F%2Fraw.githubusercontent.com%2Fgcjk768%2FHuat-Bot%2Fmain%2Fdocs%2Fdiagrams%2Farchitecture.drawio">architecture</a> ·
+<a href="https://app.diagrams.net/#Uhttps%3A%2F%2Fraw.githubusercontent.com%2Fgcjk768%2FHuat-Bot%2Fmain%2Fdocs%2Fdiagrams%2Fdraw-day.drawio">draw day</a> ·
+<a href="docs/diagrams">how to regenerate</a></sub></p>
+
+> [!NOTE]
+> Every figure comes from Python code. If you switch on the optional commentary, Claude only writes a
+> short comment about figures the code already computed. Every draw is independent, so nothing here
+> changes your odds of winning; the bot helps you spend within a budget and avoid sharing prizes.
 
 ## Contents
 
@@ -288,10 +310,12 @@ delete its row later.
 
 ## Schedule and retries
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/draw-day-dark.svg">
-  <img alt="On a draw day the bot wakes at 7.30pm, waits for the result, then fetches, analyses, backtests, suggests, writes the vault and posts" src="docs/diagrams/draw-day-light.svg">
-</picture>
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/draw-day-dark.svg">
+    <img alt="On a draw day the bot wakes at 7.30pm, waits for the result, then fetches, analyses, backtests, suggests, writes the vault and posts" src="docs/diagrams/draw-day-light.svg" width="100%">
+  </picture>
+</p>
 
 | When | What happens |
 | --- | --- |
