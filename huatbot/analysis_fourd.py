@@ -8,7 +8,6 @@ skipped. Nothing here predicts a draw: every draw is independent.
 from __future__ import annotations
 
 import logging
-from math import isfinite
 
 import numpy as np
 import pandas as pd
@@ -115,14 +114,10 @@ def digit_set_freq(df: pd.DataFrame, k: int = 10) -> list[tuple[str, int]]:
 
 
 def format_p(p: float) -> str:
-    """p value for prose. Never scientific notation (that would put a dash in the text)."""
-    if not isfinite(p):
-        return "n/a"
-    if p >= 0.01:
-        return f"{p:.2f}"
-    if p >= 0.0001:
-        return f"{p:.4f}".rstrip("0")
-    return "below 0.0001"
+    """p value for prose, formatted exactly like the TOTO verdict (shared rules)."""
+    from .analysis_toto import format_p as _format_p
+
+    return _format_p(p)
 
 
 def chi_square_digits(df: pd.DataFrame) -> dict:

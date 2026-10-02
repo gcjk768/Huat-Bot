@@ -103,11 +103,11 @@ python -m huatbot demo                    # writes ./demo-vault, open it as a va
 VAULT_PATH=/path/to/MyVault python -m huatbot run --dry-run
 ```
 
-Only docker compose reads `.env`. Outside Docker, export its values into the shell first, or the
-run has no Telegram token and turns into a dry run (it warns about this):
+Outside Docker the bot reads `.env` from the folder you run it in (or the file named by `ENV_FILE`).
+Values already set in the shell win over the file. Without a Telegram token the run turns into a dry
+run and says so.
 
 ```bash
-set -a; . ./.env; set +a                  # export every line of .env
 VAULT_PATH=/path/to/MyVault python -m huatbot run
 ```
 
@@ -332,7 +332,7 @@ delete its row later.
 | Draw days | TOTO on Monday and Thursday, 4D on Wednesday, Saturday and Sunday, all at 6.30pm Singapore time. Special draws on other days are picked up from the next draw pages and kept in `Data/state.json`. |
 | Run time | 7.30pm Singapore time on a draw day (`RUN_AT`). |
 | Retries | If the new result is not on the site yet, the bot checks again every 10 minutes (`RETRY_MINUTES`) for up to 2 hours (`RETRY_HOURS`). |
-| Gave up | If a result is still missing after that, the bot posts a short notice and logs it. The next run picks the draw up. |
+| Gave up | If a result is still missing after that, the bot posts a short notice and logs it. The next run of that game stores the draw and checks your tickets for it, but message 1 only shows the newest draw. |
 | No draw today | Nothing is posted; the activity log gets a row. |
 | Restart | If the container starts inside the retry window (say the NAS rebooted at 8pm on a draw day), it runs straight away instead of waiting for the next day. |
 | No double posts | `Data/state.json` remembers the newest draw posted for each game, so the scheduler never posts the same draw twice, even after a restart. If only some of the three messages went out (Telegram failed half way), the next run sends just the missing ones. A manual `run` posts again on purpose. |
@@ -399,7 +399,7 @@ default, and the problem is listed in the report.
 
 These are read when the container is created. After changing `.env`, run `docker compose up -d`
 (it recreates the container) or redeploy the project in the UGOS Docker app; a plain restart keeps
-the old values. Outside Docker, export them into the shell (see [Quick start](#quick-start)).
+the old values. Outside Docker the bot reads `.env` from the folder you run it in (or `ENV_FILE`), and values already set in the shell win.
 
 | Variable | Default | What it does |
 | --- | --- | --- |
@@ -419,6 +419,7 @@ the old values. Outside Docker, export them into the shell (see [Quick start](#q
 | `ANTHROPIC_API_KEY` | none | Only for `COMMENTARY=claude`. |
 | `CLAUDE_BIN` | `claude` | Optional: path of the Claude Code command. |
 | `LOG_LEVEL` | `INFO` for `serve`, `WARNING` for other commands | `DEBUG`, `INFO`, `WARNING` or `ERROR`. |
+| `ENV_FILE` | `.env` | Outside Docker only: the file the bot reads settings like the Telegram token from. |
 | `TZ` | `Asia/Singapore` | Time zone for log timestamps. Set by compose. |
 
 ## How the numbers are worked out

@@ -195,7 +195,7 @@ def test_chi_square_empty_and_tiny():
     assert "too few" in chi["verdict"] and no_dashes(chi["verdict"])
 
 
-@pytest.mark.parametrize("p,text", [(0.5, "0.50"), (0.012, "0.01"), (0.00347, "0.0035"),
+@pytest.mark.parametrize("p,text", [(0.5, "0.50"), (0.012, "0.012"), (0.995, "above 0.99"),
                                     (0.00001, "below 0.0001"), (float("nan"), "n/a")])
 def test_format_p(p, text):
     assert A.format_p(p) == text

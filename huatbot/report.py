@@ -540,7 +540,7 @@ def backtest_md(result: BacktestResult | None, game: str) -> str:
             f"{fmt_num(result.random_sets_per_draw)} random players.")
     table = md_table(
         ["Strategy", "Draws", "Cost", "Winnings", "Return per $1", "Prize draws", "Best prize",
-         "Beat random", "Verdict"], rows, align="lrrrrrrrl")
+         "Rank vs random", "Verdict"], rows, align="lrrrrrrrl")
     notes = "\n".join(f"* {clean_text(n)}" for n in result.notes)
     return "\n\n".join(p for p in (head, table, notes) if p)
 

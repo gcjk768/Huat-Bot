@@ -84,6 +84,9 @@ def full_ctx(settings, rules, toto_df, fourd_df, next_toto, next_fourd):
     signal = BuySignal(label="HIGH", jackpot=3_500_000.0, draw_type="cascade", no_winner_streak=3,
                        boards_estimate=4_000_000.0, boards_method="median", ev_per_dollar=0.7234,
                        ev_breakdown={"total": 0.7234}, reason="cascade draw")
+    # The shared synthetic 4D history ends in 2025, so its "next draw" is in the past at NOW and
+    # would rightly be treated as stale; use a 4D next draw after NOW instead.
+    next_fourd = NextFourD(draw_datetime=datetime(2026, 10, 3, 18, 30, tzinfo=SG))
     return Context(
         now=NOW, settings=settings, rules=rules, toto=toto_df, fourd=fourd_df,
         next_toto=next_toto, next_fourd=next_fourd, buy_signal=signal,
@@ -326,3 +329,15 @@ def test_end_to_end_with_context(full_ctx):
              f"at $0.72 per $1, and the Hot strategy did no better than random.")
     out = build_commentary(figs, mode="claude", runner=FakeRunner(reply))
     assert out == reply
+
+
+def test_figures_skip_next_draw_info_about_a_draw_already_held(full_ctx):
+    # The next draw page still shows a draw that is already in the stored results: its jackpot
+    # belongs to that draw, so it must not reach the commentary.
+    import dataclasses
+    last = full_ctx.toto["draw_date"].max()
+    # Copy, never mutate: next_toto is a session wide fixture.
+    full_ctx.next_toto = dataclasses.replace(
+        full_ctx.next_toto, draw_datetime=datetime.combine(last.date(), datetime.min.time(), tzinfo=SG))
+    figs = figures_from_context(full_ctx)
+    assert "next_toto" not in figs or not figs["next_toto"]

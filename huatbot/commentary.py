@@ -93,9 +93,18 @@ def _latest_row(df: Any) -> Any:
     return df.loc[df["draw_number"].astype("int64").idxmax()]
 
 
+def _current(ctx: Any, game: str) -> bool:
+    """False when the next draw info is about a draw already held (see report.next_info_is_current)."""
+    try:
+        from .report import next_info_is_current
+        return bool(next_info_is_current(ctx, game))
+    except Exception:  # a partial context in tests or an odd value: keep the figures
+        return True
+
+
 def _next_toto(ctx: Any) -> dict:
     nt = getattr(ctx, "next_toto", None)
-    if nt is None:
+    if nt is None or not _current(ctx, "toto"):
         return {}
     dt = getattr(nt, "draw_datetime", None)
     jackpot = getattr(nt, "jackpot_estimate", None)
@@ -120,6 +129,8 @@ def _buy_signal(ctx: Any) -> dict:
 
 def _next_fourd(ctx: Any) -> dict:
     nf = getattr(ctx, "next_fourd", None)
+    if nf is not None and not _current(ctx, "4d"):
+        return {}
     dt = getattr(nf, "draw_datetime", None) if nf is not None else None
     return {"draw_time": fmt_datetime(dt)} if dt is not None else {}
 
