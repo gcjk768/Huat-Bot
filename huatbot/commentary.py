@@ -152,12 +152,18 @@ def _latest_fourd(ctx: Any) -> dict:
     }
 
 
+def _line_label(line: Any) -> str:
+    """ "Low Crowd (Ordinary)", "Hot Digits (Big)", or just "System 7" when the bet type repeats it."""
+    label, bet = _s(getattr(line, "label", "")), _s(getattr(line, "bet_type", "") or "")
+    return f"{label} ({bet})" if bet and bet != label else label
+
+
 def _plan(plan: Any, picks: Iterable[Any]) -> dict:
     if plan is not None:
         lines = list(getattr(plan, "lines", []) or [])
         alternative = getattr(plan, "alternative", None)
         return {
-            "buy": [_s(f"{line.label} ({line.bet_type})") for line in lines],
+            "buy": [_line_label(line) for line in lines],
             "total_cost": _money_auto(getattr(plan, "total", None)),
             "budget": _money_auto(getattr(plan, "budget", None)),
             "alternative_total_cost": _money_auto(alternative.total) if alternative is not None else None,
@@ -253,7 +259,6 @@ _SCALES = {
     "m": 6, "mil": 6, "mn": 6, "million": 6,
     "b": 9, "bn": 9, "billion": 9,
 }
-_ORDINALS = ("st", "nd", "rd", "th")
 
 
 def _normalise_times(text: str) -> str:
@@ -340,7 +345,7 @@ def _clean(text: str) -> str:
     t = text.strip()
     t = re.sub(r"^```[^\n]*\n?|\n?```\s*$", "", t)  # a reply wrapped in a code fence
     t = re.sub(r"^\s{0,3}#{1,6}\s+", "", t, flags=re.M)  # headings
-    t = re.sub(r"(\*\*|__|`)", "", t)  # bold and code marks
+    t = re.sub(r"(\*+|__|`)", "", t)  # emphasis and code marks
     t = " ".join(t.split())
     if len(t) >= 2 and t[0] == t[-1] and t[0] in "\"'":
         t = t[1:-1].strip()

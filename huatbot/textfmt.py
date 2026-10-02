@@ -60,7 +60,12 @@ def _decimal(x: Any) -> Decimal | None:
     if _is_missing(x) or isinstance(x, (bool, np.bool_)):
         return None
     try:
-        d = Decimal(x) if isinstance(x, (int, np.integer, Decimal)) else Decimal(repr(float(x)))
+        if isinstance(x, Decimal):
+            d = x
+        elif isinstance(x, (int, np.integer)):
+            d = Decimal(int(x))  # Decimal does not accept numpy integers directly
+        else:
+            d = Decimal(repr(float(x)))
     except (TypeError, ValueError, InvalidOperation):
         return None
     return d if d.is_finite() else None
