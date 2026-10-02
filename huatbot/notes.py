@@ -19,6 +19,7 @@ no dashes in prose (wikilinks with ISO dates and table separator rows are fine).
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime
 from typing import Any
 
@@ -42,6 +43,7 @@ from .report import (
     fourd_result_md,
     latest_row,
     link,
+    picks_not_in_plan,
     next_draw,
     note_link,
     odds_line,
@@ -64,6 +66,7 @@ from .textfmt import (
     plural,
     toto_nums,
 )
+from .vault import render_note
 
 log = logging.getLogger(__name__)
 
@@ -340,11 +343,13 @@ def _suggestion_note(ctx: Context, game: str) -> NoteSpec | None:
         "budget": plan.budget if plan is not None else None,
         "total_cost": plan.total if plan is not None else None,
     }
+    # The properties list what the plan buys (the What to buy table), System 7 line included.
+    lines = plan.lines if plan is not None else []
     if game == "toto":
-        frontmatter["sets"] = [toto_nums(p.numbers) for p in picks]
+        frontmatter["sets"] = [ln.numbers for ln in lines]
         frontmatter["buy_signal"] = toto_signal(ctx)["label"]
     else:
-        frontmatter["numbers"] = " ".join(p.number for p in picks)  # text, see fourd_draw_note
+        frontmatter["numbers"] = " ".join(ln.numbers for ln in lines)  # text, see fourd_draw_note
     frontmatter["generated"] = _stamp(ctx.now)
 
     parts = [
@@ -353,8 +358,7 @@ def _suggestion_note(ctx: Context, game: str) -> NoteSpec | None:
         "## What to buy",
         plan_md(plan, game),
     ]
-    bought = {ln.label for ln in plan.lines} if plan is not None else set()
-    others = [p for p in picks if p.name not in bought]
+    others = picks_not_in_plan(plan, picks, game)
     if others:
         parts.append("## Other suggestions")
         if game == "toto":
@@ -480,25 +484,52 @@ def report_note(ctx: Context, report_md: str) -> NoteSpec:
 
 # Writing
 
+# Frontmatter lines that only stamp the time of the run, and the link to the run's report in a
+# suggestion note: a note whose only change is in these is not rewritten (or logged as updated).
+_STAMP_LINE = re.compile(r"^(?:updated|generated): .*(?:\n|$)", re.M)
+_REPORT_LINK = re.compile(r"\[\[\d{4}-\d{2}-\d{2} \d{4} Report\]\]")
 
-def _draw_rows(ctx: Context, game: str) -> list[Any]:
+
+def _without_stamps(rel: str, text: str) -> str:
+    head, sep, body = text.partition("\n---\n") if text.startswith("---\n") else ("", "", text)
+    if rel.startswith(f"{SUGGESTION_FOLDER}/"):
+        body = _REPORT_LINK.sub("[[report]]", body)
+    return _STAMP_LINE.sub("", head) + sep + body
+
+
+def _only_stamps_changed(vault, rel: str, body: str, frontmatter: dict) -> bool:
+    """True when the note on disk differs from the new content only in its run time stamps."""
+    old = vault.read_text(rel)
+    if old is None:
+        return False
+    return _without_stamps(rel, old) == _without_stamps(rel, render_note(body, frontmatter))
+
+
+def _draw_rows(ctx: Context, game: str, vault=None) -> list[Any]:
     """Rows of ``ctx.new_draws[game]``, newest first, capped at settings.draw_notes_backfill.
     The newest new draw always gets its note (even with a cap of 0), because the Dashboard
-    and the report link to the latest draw note."""
+    and the report link to the latest draw note. With ``vault``, the newest stored draw is
+    also included when its note is missing (a run stopped after saving the draw but before
+    writing its note), so that link never points at a missing note."""
     cap = max(int(getattr(ctx.settings, "draw_notes_backfill", 0) or 0), 1)
     wanted = {int(n) for n in (ctx.new_draws or {}).get(game, []) or []}
     df = ctx.toto if game == "toto" else ctx.fourd
-    if not wanted or not isinstance(df, pd.DataFrame) or df.empty:
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return []
+    newest = latest_row(df)
+    if vault is not None and newest is not None and not vault.exists(draw_note_path(game, newest)):
+        wanted.add(as_int(field(newest, "draw_number")))
+    if not wanted:
         return []
     rows = df[df["draw_number"].astype("int64").isin(wanted)].sort_values("draw_number", ascending=False)
     return [r for _, r in rows.head(cap).iterrows()]
 
 
-def _all_notes(ctx: Context, report_md: str) -> list[NoteSpec]:
+def _all_notes(ctx: Context, report_md: str, vault=None) -> list[NoteSpec]:
     notes: list[NoteSpec] = []
     for game, build in (("toto", toto_draw_note), ("4d", fourd_draw_note)):
         # Oldest first, so the activity log reads in draw order.
-        notes += [build(r) for r in reversed(_draw_rows(ctx, game))]
+        notes += [build(r) for r in reversed(_draw_rows(ctx, game, vault))]
     notes.append(report_note(ctx, report_md))
     notes += suggestions_notes(ctx)
     notes.append(ledger_note(ctx))
@@ -510,17 +541,20 @@ def write_all(vault, ctx: Context, report_md: str) -> list[str]:
     """Write every note of this run into the vault; return the relative paths actually written.
 
     Draw notes are written for ``ctx.new_draws`` (at most ``settings.draw_notes_backfill`` most
-    recent per game, and always the newest one), then the report, the suggestion notes, the
-    ledger and the dashboard. A note whose content is unchanged is not rewritten
-    (``Vault.write_note`` returns False) and not logged. Every write is logged as a NOTE event
+    recent per game, and always the newest one) and for the newest stored draw when its note is
+    missing, then the report, the suggestion notes, the ledger and the dashboard. A note whose
+    content is unchanged, apart from the run time stamps in its properties (and the report link
+    of a suggestion note), is not rewritten and not logged. Every write is logged as a NOTE event
     with a link that includes the note's folder; a note that cannot be written is logged as an
     ERROR event and the others are still written.
     """
     written: list[str] = []
-    for rel, frontmatter, body in _all_notes(ctx, report_md):
+    for rel, frontmatter, body in _all_notes(ctx, report_md, vault):
         name = note_link(rel)
         try:
             existed = vault.exists(rel)
+            if existed and _only_stamps_changed(vault, rel, body, frontmatter):
+                continue
             changed = vault.write_note(rel, body, frontmatter)
         except (OSError, ValueError) as exc:
             log.warning("Could not write %s: %s", rel, exc)

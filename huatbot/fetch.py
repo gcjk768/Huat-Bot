@@ -15,7 +15,7 @@ above anything plausible is refused instead of crawled.
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any, Callable, Iterable
 from zoneinfo import ZoneInfo
 
@@ -186,6 +186,21 @@ def tag_draw_types(df: pd.DataFrame, cascade: Iterable[int] | None, hongbao: Ite
         types.append(t)
     out.loc[order, "draw_type"] = types
     return out
+
+
+def _regular_draw_day_between(after: date, before: date, weekdays: Iterable[int]) -> bool:
+    """True when a day strictly between ``after`` and ``before`` falls on one of ``weekdays``."""
+    days = set(weekdays)
+    return any((after + timedelta(days=i)).weekday() in days for i in range(1, (before - after).days))
+
+
+def _behind(toto_df: pd.DataFrame | None, next_day: date | None) -> bool:
+    """True when a regular TOTO draw day falls between the newest stored draw and ``next_day``:
+    a draw was held that is not stored, so the stored no winner streak may be out of date."""
+    if toto_df is None or toto_df.empty or next_day is None:
+        return False
+    last = _as_date(toto_df.sort_values("draw_number").iloc[-1]["draw_date"])
+    return last is not None and _regular_draw_day_between(last, next_day, C.TOTO_WEEKDAYS)
 
 
 def _predicted_draw_type(toto_df: pd.DataFrame | None) -> str:
@@ -393,6 +408,7 @@ def _update(game: str, fetcher, df: pd.DataFrame, wanted: Callable[[int], range]
     failures = [(n, reason) for n, reason in failures if n not in recheck]
     result.new_draws = sorted(int(r["draw_number"]) for r in rows if int(r["draw_number"]) not in recheck)
     result.failed_draws = sorted(n for n, _ in failures)
+    result.repaired_draws = list(repaired)
     what = "winning shares" if is_toto else "winning numbers"
     for n in repaired:
         result.messages.append(f"{label} draw {n} was updated with its {what}.")
@@ -534,10 +550,15 @@ def fetch_next_draws(fetcher, toto_df: pd.DataFrame | None) -> tuple[NextToto | 
             info = parse_toto_next_draw(page)
             if info["draw_datetime"] is not None or info["jackpot_estimate"] is not None:
                 hint = info["draw_type_hint"]
+                when = info["draw_datetime"]
+                next_day = _as_date(when.astimezone(SG) if isinstance(when, datetime) and when.tzinfo else when)
+                # Stored results that are behind say nothing about the next draw's type: "normal"
+                # (not None, which would make buysignal predict again from the same frame).
+                predicted = "normal" if _behind(toto_df, next_day) else _predicted_draw_type(toto_df)
                 next_toto = NextToto(
                     draw_datetime=info["draw_datetime"],
                     jackpot_estimate=info["jackpot_estimate"],
-                    draw_type=hint or _predicted_draw_type(toto_df),
+                    draw_type=hint or predicted,
                     draw_type_hint=hint,
                     raw_text=info["raw_text"][:RAW_TEXT_LIMIT],
                 )

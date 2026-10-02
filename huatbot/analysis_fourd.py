@@ -150,7 +150,7 @@ def chi_square_digits(df: pd.DataFrame) -> dict:
     p_all = float(stats.chi2.sf(total, DOF_OVERALL))
 
     p_text = format_p(p_all)
-    p_part = f"p = {p_text}" if p_all >= 0.0001 else f"p {p_text}"
+    p_part = f"p {p_text}" if p_text.startswith(("above", "below")) else f"p = {p_text}"
     if n_numbers < MIN_NUMBERS_FOR_TEST:
         verdict = (f"Only {n_numbers} winning numbers so far, too few for a reliable test, "
                    "so hot and cold digits mean nothing yet.")

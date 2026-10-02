@@ -525,6 +525,19 @@ def _run_cycle(day: date, known: dict[str, set[date]], run_fn, check_fn, refresh
     finished: set[str] = set()
 
     def on_ready(ready: tuple[str, ...], retry_at: dict[str, datetime | None]) -> set[str]:
+        # A draw an earlier run already stored (and posted) is not run again, for example after
+        # a restart inside the retry window.
+        already = {g for g in ready if done_fn is not None and _is_done(g, day, None, done_fn)}
+        if already:
+            one = len(already) == 1
+            _safe_call(log_fn, "SCHEDULE", f"{_names(g for g in ready if g in already)} "
+                                           f"{'result' if one else 'results'} for {_fmt_day(day)} "
+                                           f"{'was' if one else 'were'} already handled by an earlier run, so "
+                                           f"{'it is' if one else 'they are'} not run again")
+            finished.update(already)
+        ready = tuple(g for g in ready if g not in already)
+        if not ready:
+            return already
         result: Any = _FAILED
         try:
             result = run_fn(games=ready)
@@ -540,7 +553,7 @@ def _run_cycle(day: date, known: dict[str, set[date]], run_fn, check_fn, refresh
             _safe_call(log_fn, "WAIT", f"{_names(left)} {'result' if one else 'results'} for {_fmt_day(day)} "
                                        f"{'is' if one else 'are'} out but {'was' if one else 'were'} not stored "
                                        f"or posted yet, trying again at {_fmt_clock(when.time())}")
-        return done
+        return done | already
 
     status = wait_for_results(games, day, check_fn, now_fn, sleep_fn, config.retry_minutes, config.retry_hours,
                               on_ready=on_ready, start_at=start_at)

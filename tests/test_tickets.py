@@ -19,11 +19,14 @@ from huatbot.models import LEDGER_COLUMNS, PrizeRules, Ticket
 from huatbot.store import empty_ledger, load_ledger, save_ledger
 from huatbot.tickets import (
     REMOVED_RESULT,
+    REPLACED_PREFIX,
     TICKETS_TEMPLATE,
+    has_ticket_table,
     ledger_totals,
     parse_date,
     parse_tickets,
     settle_ledger,
+    settled_rows,
     sync_ledger,
     ticket_id,
     ticket_ids,
@@ -457,6 +460,27 @@ def test_sync_never_deletes_and_retires_removed_unchecked_rows():
     assert (kept["status"] == led["status"]).all()
 
 
+def test_emptying_the_ticket_table_retires_pending_rows():
+    pending = "| TOTO | 5 Oct 2026 | 3 11 19 27 38 45 | Ordinary | 1 |"
+    checked = "| 4D | 4 Oct 2026 | 1234 | Big | 1 |"
+    led = ledger_for(note(pending, checked))
+    led.loc[led["game"] == "4D", "status"] = "settled"
+    # The user deleted every row but kept the table: the pending ticket leaves the totals.
+    assert has_ticket_table(note())
+    out = sync_ledger(led, parse_tickets(note()), NOW, note_read=True)
+    by_numbers = out.set_index("numbers")
+    assert by_numbers.loc["3 11 19 27 38 45", "status"] == "invalid"
+    assert by_numbers.loc["3 11 19 27 38 45", "result"] == REMOVED_RESULT
+    assert by_numbers.loc["1234", "status"] == "settled"
+    assert ledger_totals(out)["spent"] == pytest.approx(1.0)
+    # A missing note, or one without a ticket table, retires nothing.
+    for text in (None, "", "# My tickets\n\nNothing here yet.\n", "```\n" + HEADER + "```\n"):
+        assert not has_ticket_table(text)
+    assert has_ticket_table(TICKETS_TEMPLATE)
+    kept = sync_ledger(led, [], NOW, note_read=False)
+    assert (kept["status"] == led["status"]).all()
+
+
 # settle_ledger
 
 
@@ -669,3 +693,115 @@ def test_incomplete_results_keep_tickets_pending(toto_df, fourd_df, rules):
     # Once the complete result is stored, both settle.
     led, settled = settle_ledger(led, toto_df, fourd_df, rules, NOW)
     assert len(settled) == 2
+
+
+# Editing a ticket that was already checked
+
+
+def group7_numbers(row) -> str:
+    """A TOTO set matching exactly 3 winning numbers of ``row`` (a Group 7 win)."""
+    win = [int(row[f"n{i}"]) for i in range(1, 7)]
+    others = [n for n in range(1, 50) if n not in win and n != int(row["additional"])]
+    return " ".join(str(n) for n in sorted(win[:3] + others[:3]))
+
+
+def settle_note(led, text, toto_df, fourd_df, rules, when):
+    led = sync_ledger(led, parse_tickets(text), when, note_read=has_ticket_table(text))
+    return settle_ledger(led, toto_df, fourd_df, rules, when)
+
+
+def test_editing_the_cost_of_a_checked_ticket_counts_it_once(toto_df, fourd_df, rules):
+    row = toto_df.iloc[-3]
+    g7 = float(row["g7_share"])
+    nums = group7_numbers(row)
+    before = note(f"| TOTO | {iso(row['draw_date'])} | {nums} | Ordinary | $1 |")
+    after = note(f"| TOTO | {iso(row['draw_date'])} | {nums} | Ordinary | $2 |")
+    led, settled = settle_note(empty_ledger(), before, toto_df, fourd_df, rules, NOW)
+    assert [r["winnings"] for r in settled] == [pytest.approx(g7)]
+
+    led, settled = settle_note(led, after, toto_df, fourd_df, rules, NOW + timedelta(days=1))
+    assert len(led) == 2
+    old, new = led.iloc[0], led.iloc[1]
+    assert old["status"] == "invalid"
+    assert old["result"] == f"{REPLACED_PREFIX} (was: Group 7 x1, won ${g7:,.0f})"
+    assert old["winnings"] == pytest.approx(g7)  # kept for the record, not counted
+    assert new["status"] == "settled" and new["winnings"] == pytest.approx(2 * g7)
+    assert [r["ticket_id"] for r in settled] == [new["ticket_id"]]
+    totals = ledger_totals(led)
+    assert totals["spent"] == pytest.approx(2.0) and totals["won"] == pytest.approx(2 * g7)
+    assert totals["tickets"] == 1
+    # Syncing the same note again changes nothing.
+    again, settled_again = settle_note(led, after, toto_df, fourd_df, rules, NOW + timedelta(days=2))
+    assert settled_again == []
+    pd.testing.assert_frame_equal(again, led)
+
+    # Putting the original line back brings the original figures back.
+    led, settled = settle_note(led, before, toto_df, fourd_df, rules, NOW + timedelta(days=3))
+    assert len(led) == 2
+    assert list(led["status"]) == ["settled", "invalid"]
+    assert led.iloc[1]["result"].startswith(REPLACED_PREFIX)
+    assert [r["ticket_id"] for r in settled] == [led.iloc[0]["ticket_id"]]
+    totals = ledger_totals(led)
+    assert totals["spent"] == pytest.approx(1.0) and totals["won"] == pytest.approx(g7)
+    assert totals["tickets"] == 1
+
+
+def test_deleting_one_checked_row_and_editing_another_retires_only_the_edited_one(toto_df, fourd_df, rules):
+    row = toto_df.iloc[-3]
+    day = iso(row["draw_date"])
+    a = group7_numbers(row)
+    win = {int(row[f"n{i}"]) for i in range(1, 7)} | {int(row["additional"])}
+    spare = [n for n in range(1, 50) if n not in win and str(n) not in a.split()]
+    b = " ".join(str(n) for n in sorted(spare[:6]))
+    b_typo = " ".join(str(n) for n in sorted(spare[:5] + spare[6:7]))  # one number corrected
+    led, _ = settle_note(empty_ledger(), note(f"| TOTO | {day} | {a} | Ordinary | $1 |",
+                                              f"| TOTO | {day} | {b} | Ordinary | $1 |"),
+                         toto_df, fourd_df, rules, NOW)
+    assert set(led["status"]) == {"settled"}
+
+    led, settled = settle_note(led, note(f"| TOTO | {day} | {b_typo} | Ordinary | $1 |"),
+                               toto_df, fourd_df, rules, NOW + timedelta(days=1))
+    by_numbers = led.set_index("numbers")
+    assert by_numbers.loc[a, "status"] == "settled"  # deleted only: still counted
+    assert by_numbers.loc[b, "status"] == "invalid" and by_numbers.loc[b, "result"].startswith(REPLACED_PREFIX)
+    assert by_numbers.loc[b_typo, "status"] == "settled"
+    assert ledger_totals(led)["spent"] == pytest.approx(2.0) and ledger_totals(led)["tickets"] == 2
+
+
+def test_editing_one_of_two_identical_checked_lines(toto_df, fourd_df, rules):
+    row = toto_df.iloc[-3]
+    line = f"| TOTO | {iso(row['draw_date'])} | {group7_numbers(row)} | Ordinary | $1 |"
+    led, _ = settle_note(empty_ledger(), note(line, line), toto_df, fourd_df, rules, NOW)
+    edited = line.replace("$1", "$2")
+    led, _ = settle_note(led, note(edited, line), toto_df, fourd_df, rules, NOW + timedelta(days=1))
+    assert list(led["status"]) == ["settled", "invalid", "settled"]
+    g7 = float(row["g7_share"])
+    totals = ledger_totals(led)
+    assert totals["spent"] == pytest.approx(3.0) and totals["won"] == pytest.approx(3 * g7)
+
+
+def test_deleting_checked_rows_without_a_matching_new_line_keeps_them(toto_df, fourd_df, rules):
+    row = toto_df.iloc[-3]
+    day = iso(row["draw_date"])
+    nums = group7_numbers(row)
+    led, _ = settle_note(empty_ledger(), note(f"| TOTO | {day} | {nums} | Ordinary | $1 |"),
+                         toto_df, fourd_df, rules, NOW)
+    # Tidied away, while tickets for another draw and an unrelated set for the same draw came in.
+    win = {int(row[f"n{i}"]) for i in range(1, 7)} | {int(row["additional"])}
+    unrelated = " ".join(str(n) for n in [n for n in range(1, 50) if n not in win and str(n) not in nums.split()][:6])
+    led, _ = settle_note(led, note(f"| TOTO | 5 Oct 2026 | {nums} | Ordinary | $1 |",
+                                   f"| TOTO | {day} | {unrelated} | Ordinary | $1 |"),
+                         toto_df, fourd_df, rules, NOW + timedelta(days=1))
+    first = led.iloc[0]
+    assert first["numbers"] == nums and first["draw_date"] == day and first["status"] == "settled"
+    assert not led["result"].str.startswith(REPLACED_PREFIX).any()
+    assert ledger_totals(led)["tickets"] == 3
+
+
+def test_settled_rows_returns_checked_rows_in_order(toto_df, fourd_df, rules):
+    row = toto_df.iloc[-3]
+    text = note(f"| TOTO | {iso(row['draw_date'])} | {group7_numbers(row)} | Ordinary | $1 |",
+                "| TOTO | 5 Oct 2030 | 1 2 3 4 5 6 | Ordinary | $1 |")
+    led, settled = settle_note(empty_ledger(), text, toto_df, fourd_df, rules, NOW)
+    ids = list(led["ticket_id"])
+    assert settled_rows(led, [ids[1], ids[0], "missing"]) == settled  # pending and unknown ids skipped

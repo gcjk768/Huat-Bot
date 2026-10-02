@@ -118,10 +118,11 @@ def toto_plan(
     """What to buy for one TOTO draw within ``budget``.
 
     $1 per set in TOTO_PRIORITY order while the budget allows (at most 4 sets). If
-    ``offer_system7`` and at least $7 is left after the sets, a System 7 line is added (built
-    with ``system7_from`` from the Low Crowd pick, or the top priority pick if there is no Low
-    Crowd pick) and the set it was built from is not bought on its own, because its board is
-    already one of the System 7's boards. Otherwise, if ``offer_system7`` and the budget is at
+    ``offer_system7`` and a System 7 fits the budget next to those sets, a System 7 line is
+    added (built with ``system7_from`` from the Low Crowd pick, or the top priority pick if
+    there is no Low Crowd pick) and the set it was built from is not bought on its own,
+    because its board is already one of the System 7's boards (so that set's $1 does not
+    count in the fit test). Otherwise, if ``offer_system7`` and the budget is at
     least $7, ``alternative`` is a plan with the System 7 plus as many other sets as fit, with
     the same rule. ``plan.total`` (and ``alternative.total``) never exceed the budget.
     """
@@ -137,10 +138,12 @@ def toto_plan(
 
     n_sets = min(len(ordered), TOTO_MAX_SETS, math.floor(budget / TOTO_SET_COST))
     plan.lines = [_set_line(p) for p in ordered[:n_sets]]
-    left = budget - plan.total
     source = next((p for p in ordered if p.name == "Low Crowd"), ordered[0])
+    # The source set is dropped when the System 7 is added, so its $1 is not part of the cost.
+    drops_source = any(p is source for p in ordered[:n_sets])
+    cost_with_s7 = (n_sets - (1 if drops_source else 0)) * TOTO_SET_COST + SYSTEM7_COST
 
-    if offer_system7 and left >= SYSTEM7_COST:
+    if offer_system7 and cost_with_s7 <= budget:
         # The source set is one of the System 7's boards: buying it on its own as well would
         # pay twice for the same board, so it is dropped (as in the alternative plan).
         bought = [p for p in ordered[:n_sets] if p is not source]

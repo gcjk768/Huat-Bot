@@ -130,6 +130,7 @@ class UpdateResult:
     latest_on_site: int | None = None
     latest_in_csv: int | None = None
     failed_draws: list[int] = field(default_factory=list)
+    repaired_draws: list[int] = field(default_factory=list)  # stored draws re-read because they were incomplete
     verified: bool = False  # newest CSV row matches the latest draw on the site
     messages: list[str] = field(default_factory=list)
 

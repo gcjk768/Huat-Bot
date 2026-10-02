@@ -69,22 +69,39 @@ def test_toto_plan_never_exceeds_budget(picks, scores, last_draw, offer):
             assert all(ln.label != "System 7" for ln in plan.lines)
 
 
-def test_toto_plan_ten_dollars(picks, scores, last_draw):
+def test_toto_plan_ten_dollars_includes_system7(picks, scores, last_draw):
+    # The System 7 replaces the Low Crowd set, so it fits next to the other 3 sets in $10:
+    # the same plan as with $11, not just an alternative.
     plan = G.toto_plan(picks, 10, scores, True, last_draw)
+    assert [ln.label for ln in plan.lines] == ["Balanced", "Hot", "Overdue", "System 7"]
+    assert plan.total == 10.0 and plan.alternative is None
+    seven = plan.lines[-1]
+    assert seven.cost == 7.0 and seven.bet_type == "System 7"
+    low = next(p for p in picks if p.name == "Low Crowd")
+    assert seven.numbers == " ".join(map(str, S.system7_from(low, scores, last_draw)))
+    assert any("Low Crowd set is not bought on its own" in n for n in plan.notes)
+    assert not any("left unspent" in n for n in plan.notes)
+    assert any("13,983,816" in n for n in plan.notes)
+    eleven = G.toto_plan(picks, 11, scores, True, last_draw)
+    assert [(ln.label, ln.numbers) for ln in eleven.lines] == [(ln.label, ln.numbers) for ln in plan.lines]
+
+
+def test_toto_plan_nine_dollars_offers_system7_as_alternative(picks, scores, last_draw):
+    plan = G.toto_plan(picks, 9, scores, True, last_draw)
     assert [ln.label for ln in plan.lines] == list(G.TOTO_PRIORITY)
     assert all(ln.cost == 1.0 and ln.bet_type == "Ordinary" for ln in plan.lines)
     assert plan.total == 4.0
     alt = plan.alternative
-    assert alt is not None and alt.total == 10.0
+    assert alt is not None and alt.total == 9.0
     assert alt.lines[0].label == "System 7" and alt.lines[0].cost == 7.0
     assert alt.lines[0].bet_type == "System 7"
-    # The System 7 already holds the Low Crowd board, so the 3 sets are the other picks.
-    assert [ln.label for ln in alt.lines[1:]] == ["Balanced", "Hot", "Overdue"]
+    # The System 7 already holds the Low Crowd board, so the 2 sets are the next picks.
+    assert [ln.label for ln in alt.lines[1:]] == ["Balanced", "Hot"]
     low = next(p for p in picks if p.name == "Low Crowd")
     seven = S.system7_from(low, scores, last_draw)
     assert alt.lines[0].numbers == " ".join(map(str, seven))
-    assert any("alternative" in n and "$10" in n for n in plan.notes)
-    assert any("$6 of the budget is left unspent" in n for n in plan.notes)
+    assert any("alternative" in n and "$9" in n for n in plan.notes)
+    assert any("$5 of the budget is left unspent" in n for n in plan.notes)
     assert any("13,983,816" in n for n in plan.notes)
 
 
@@ -148,6 +165,9 @@ def test_toto_plan_without_low_crowd_and_without_scores(picks):
     plan = G.toto_plan(others, 10, None, True)
     assert [ln.label for ln in plan.lines] == ["Hot", "Overdue", "System 7"]  # built from Balanced
     assert plan.total == 9.0
+    # The same $9 plan fits a $9 budget: the dropped Balanced set's $1 is not counted.
+    nine = G.toto_plan(others, 9, None, True)
+    assert [ln.label for ln in nine.lines] == ["Hot", "Overdue", "System 7"] and nine.alternative is None
     assert "crowd scores not available" in plan.lines[-1].reason
     assert plan.lines[-1].reason.startswith("The Balanced set plus")
 

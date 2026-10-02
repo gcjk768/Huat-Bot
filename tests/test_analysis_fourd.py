@@ -184,6 +184,22 @@ def test_chi_square_on_biased_data():
     assert no_dashes(chi["verdict"]) and "e" not in A.format_p(1e-12).replace("below", "")
 
 
+def test_chi_square_on_a_perfectly_even_spread_says_p_above():
+    # Every position holds every digit equally often, so p is 1: "p above 0.99", not "p = above 0.99".
+    draws, j = [], 0
+    for i in range(10):
+        nums = []
+        for _ in range(23):
+            d = j % 10
+            nums.append(f"{d}{(d + 3) % 10}{(d + 7) % 10}{(d + 1) % 10}")
+            j += 1
+        draws.append((i + 1, f"2026-01-{i + 1:02d}", nums))
+    chi = A.chi_square_digits(make_df(draws))
+    assert chi["overall"]["p_value"] > 0.99
+    assert "(p above 0.99)" in chi["verdict"]
+    assert "p = above" not in chi["verdict"]
+
+
 def test_chi_square_empty_and_tiny():
     empty = normalise_fourd(pd.DataFrame(columns=["draw_number"]))
     chi = A.chi_square_digits(empty)
