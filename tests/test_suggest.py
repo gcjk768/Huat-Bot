@@ -91,12 +91,30 @@ def test_toto_plan_ten_dollars(picks, scores, last_draw):
 def test_toto_plan_eleven_dollars_includes_system7(picks, scores, last_draw):
     plan = G.toto_plan(picks, 11, scores, True, last_draw)
     labels = [ln.label for ln in plan.lines]
-    assert labels == list(G.TOTO_PRIORITY) + ["System 7"]
-    assert plan.total == 11.0 and plan.alternative is None
-    assert any("played twice" in n for n in plan.notes)
+    # The System 7 already holds the Low Crowd board, so that set is not paid for twice.
+    assert labels == ["Balanced", "Hot", "Overdue", "System 7"]
+    assert plan.total == 10.0 and plan.alternative is None
+    assert any("Low Crowd set is not bought on its own" in n for n in plan.notes)
+    assert not any("played twice" in n for n in plan.notes)
+    low = next(p for p in picks if p.name == "Low Crowd")
+    assert plan.lines[-1].numbers == " ".join(map(str, S.system7_from(low, scores, last_draw)))
+    assert any("$1 of the budget is left unspent" in n for n in plan.notes)
     big = G.toto_plan(picks, 30, scores, True, last_draw)
-    assert big.total == 11.0
-    assert any("$19 of the budget is left unspent" in n for n in big.notes)
+    assert big.total == 10.0
+    assert any("$20 of the budget is left unspent" in n for n in big.notes)
+
+
+def test_toto_plan_never_buys_the_same_board_twice(picks, scores, last_draw):
+    for budget in BUDGETS:
+        plan = G.toto_plan(picks, budget, scores, True, last_draw)
+        for p in (plan, plan.alternative):
+            seven = [ln for ln in (p.lines if p else []) if ln.label == "System 7"]
+            if not seven:
+                continue
+            seven_nums = set(seven[0].numbers.split())
+            for ln in p.lines:
+                if ln.label != "System 7":
+                    assert not set(ln.numbers.split()) <= seven_nums, (budget, ln.label)
 
 
 @pytest.mark.parametrize("budget", [0, 0.5, 0.99])
@@ -128,8 +146,8 @@ def test_toto_plan_priority_order_and_unknown_names(picks):
 def test_toto_plan_without_low_crowd_and_without_scores(picks):
     others = [p for p in picks if p.name != "Low Crowd"]
     plan = G.toto_plan(others, 10, None, True)
-    assert [ln.label for ln in plan.lines] == ["Balanced", "Hot", "Overdue", "System 7"]
-    assert plan.total == 10.0
+    assert [ln.label for ln in plan.lines] == ["Hot", "Overdue", "System 7"]  # built from Balanced
+    assert plan.total == 9.0
     assert "crowd scores not available" in plan.lines[-1].reason
     assert plan.lines[-1].reason.startswith("The Balanced set plus")
 

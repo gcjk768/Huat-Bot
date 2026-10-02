@@ -261,6 +261,18 @@ def test_post_messages_reports_partial_failure():
     assert len(session.calls) == 2
 
 
+def test_post_messages_reports_progress_after_each_message():
+    bad = FakeResponse(403, {"ok": False, "description": "Forbidden"})
+    session = FakeSession(ok(), bad)
+    sent: list[int] = []
+    with pytest.raises(TelegramError):
+        post_messages(["a", "b", "c"], TOKEN, CHAT, session=session, sleep=Sleeps(), on_sent=sent.append)
+    assert sent == [1]  # only the message that really went out
+    sent.clear()
+    assert post_messages(["a", "b"], TOKEN, CHAT, session=FakeSession(), sleep=Sleeps(), on_sent=sent.append)
+    assert sent == [1, 2]
+
+
 def test_post_messages_empty_list():
     assert post_messages([], TOKEN, CHAT, session=FakeSession()) is False
 

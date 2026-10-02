@@ -120,10 +120,10 @@ def toto_plan(
     $1 per set in TOTO_PRIORITY order while the budget allows (at most 4 sets). If
     ``offer_system7`` and at least $7 is left after the sets, a System 7 line is added (built
     with ``system7_from`` from the Low Crowd pick, or the top priority pick if there is no Low
-    Crowd pick). Otherwise, if ``offer_system7`` and the budget is at least $7, ``alternative``
-    is a plan with the System 7 plus as many other sets as fit; the set the System 7 was built
-    from is left out there because its board is already one of the System 7's boards.
-    ``plan.total`` (and ``alternative.total``) never exceed the budget.
+    Crowd pick) and the set it was built from is not bought on its own, because its board is
+    already one of the System 7's boards. Otherwise, if ``offer_system7`` and the budget is at
+    least $7, ``alternative`` is a plan with the System 7 plus as many other sets as fit, with
+    the same rule. ``plan.total`` (and ``alternative.total``) never exceed the budget.
     """
     budget = _clean_budget(budget)
     plan = Plan(game="TOTO", budget=budget)
@@ -141,14 +141,18 @@ def toto_plan(
     source = next((p for p in ordered if p.name == "Low Crowd"), ordered[0])
 
     if offer_system7 and left >= SYSTEM7_COST:
-        plan.lines.append(_system7_line(source, crowd_scores, last_draw))
+        # The source set is one of the System 7's boards: buying it on its own as well would
+        # pay twice for the same board, so it is dropped (as in the alternative plan).
+        bought = [p for p in ordered[:n_sets] if p is not source]
+        plan.lines = [_set_line(p) for p in bought] + [_system7_line(source, crowd_scores, last_draw)]
+        sets_text = f"{plural(len(bought), 'set')} at $1 each plus a System 7" if bought else "A System 7"
         plan.notes.append(
-            f"{plural(n_sets, 'set')} at $1 each plus a System 7 at {_dollars(SYSTEM7_COST)}: "
-            f"{_dollars(plan.total)} of the {_dollars(budget)} budget."
+            f"{sets_text} at {_dollars(SYSTEM7_COST)}: {_dollars(plan.total)} of the "
+            f"{_dollars(budget)} budget."
         )
-        if source in ordered[:n_sets]:
-            plan.notes.append(f"The System 7 contains the {source.name} set as one of its boards, "
-                              "so that board is played twice.")
+        if len(bought) < n_sets:
+            plan.notes.append(f"The {source.name} set is not bought on its own because it is already "
+                              "one of the boards in the System 7.")
         plan.notes.append(_system7_odds_note())
     else:
         plan.notes.append(f"{plural(n_sets, 'set')} at $1 each, in the order "
@@ -174,8 +178,8 @@ def toto_plan(
         if plan.alternative is not None:
             why = "the alternative plan uses more of it"
         elif n_sets == min(len(ordered), TOTO_MAX_SETS) and unspent >= TOTO_SET_COST:
-            why = ("every suggested set and the System 7 are already in the plan" if has_system7
-                   else "every suggested set is already in the plan")
+            why = ("every suggested set is already in the plan, on its own or inside the System 7"
+                   if has_system7 else "every suggested set is already in the plan")
         else:
             why = "sets cost whole dollars"
         plan.notes.append(f"{_dollars(unspent)} of the budget is left unspent: {why}.")

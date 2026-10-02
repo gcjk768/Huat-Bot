@@ -103,6 +103,14 @@ python -m huatbot demo                    # writes ./demo-vault, open it as a va
 VAULT_PATH=/path/to/MyVault python -m huatbot run --dry-run
 ```
 
+Only docker compose reads `.env`. Outside Docker, export its values into the shell first, or the
+run has no Telegram token and turns into a dry run (it warns about this):
+
+```bash
+set -a; . ./.env; set +a                  # export every line of .env
+VAULT_PATH=/path/to/MyVault python -m huatbot run
+```
+
 ## UGREEN NAS setup, step by step
 
 These steps use UGOS Pro. Menu names can differ a little between UGOS versions.
@@ -179,8 +187,10 @@ Copy `.env.example` to `.env` in the same folder and fill it in. At least:
 | `PUID`, `PGID` | from the `id` command |
 
 If you want to see the messages in the log before anything is posted, set `DRY_RUN=1` for the first
-few days, then set it back to `0` and restart the container. All variables are listed under
-[Settings](#settings).
+few days, then set it back to `0` and run `docker compose up -d` (or redeploy the project in the UGOS
+Docker app). A plain restart (`docker compose restart`, `docker restart` or the Restart button in the
+Docker app) keeps the old values, because `.env` is only read when the container is created. All
+variables are listed under [Settings](#settings).
 
 ### 6a. Start it with the UGOS Docker app
 
@@ -325,7 +335,7 @@ delete its row later.
 | Gave up | If a result is still missing after that, the bot posts a short notice and logs it. The next run picks the draw up. |
 | No draw today | Nothing is posted; the activity log gets a row. |
 | Restart | If the container starts inside the retry window (say the NAS rebooted at 8pm on a draw day), it runs straight away instead of waiting for the next day. |
-| No double posts | `Data/state.json` remembers the newest draw posted for each game, so the scheduler never posts the same draw twice, even after a restart. A manual `run` posts again on purpose. |
+| No double posts | `Data/state.json` remembers the newest draw posted for each game, so the scheduler never posts the same draw twice, even after a restart. If only some of the three messages went out (Telegram failed half way), the next run sends just the missing ones. A manual `run` posts again on purpose. |
 
 The schedule always uses Singapore time, whatever the NAS time zone is.
 
@@ -386,6 +396,10 @@ default, and the problem is listed in the report.
 | `draw_notes_backfill` | 50 | 0 to 5,000 | How many recent draws of each game get their own note the first time the vault is filled. |
 
 ### In .env: environment variables
+
+These are read when the container is created. After changing `.env`, run `docker compose up -d`
+(it recreates the container) or redeploy the project in the UGOS Docker app; a plain restart keeps
+the old values. Outside Docker, export them into the shell (see [Quick start](#quick-start)).
 
 | Variable | Default | What it does |
 | --- | --- | --- |
@@ -456,8 +470,9 @@ going to play anyway, not a good investment.
 
 Sets are bought in the order Low Crowd, Balanced, Hot, Overdue while the budget allows, then a
 System 7 (7 boards, $7) built from the Low Crowd set and the least crowded number that keeps it
-pattern free, if there is room. When there is not room for both, the plan shows the System 7 as an
-alternative.
+pattern free, if there is room. The Low Crowd set is then not bought on its own as well, because it
+is already one of the System 7's boards. When there is not room for both, the plan shows the System 7
+as an alternative.
 
 | 4D pick | How the number is chosen | Bet type |
 | --- | --- | --- |
@@ -479,12 +494,17 @@ draw. At the end each strategy's total winnings are ranked among the random play
 
 | Where it lands | Verdict |
 | --- | --- |
-| between the 5th and 95th percentile | No better than random |
-| above the 95th | Beat random in this sample, but every draw is independent so do not expect it to last |
+| between the 5th and 95th percentile | No better than random (beat X% of random players, tied with Y%) |
+| above the 95th | Beat random in this sample, not expected to last |
 | below the 5th | Worse than random in this sample |
 
+The percentile is a mid rank: random players with a lower total count fully and players with the
+same total count half. Lottery totals tie a lot (many random players win nothing at all), so the
+verdict gives the players a strategy really beat and the players it tied with separately.
+
 The 4D backtest does the same with the five 4D picks against random Big $1 numbers. The scoreboard
-shows cost, winnings and return per $1 for every strategy and the average random player.
+shows cost, winnings and return per $1 for every strategy and the average random player; every
+figure in the Random row is the average over the random players.
 
 ## Optional Claude commentary
 
@@ -504,11 +524,11 @@ Claude Code, the log says the command was not found and the messages go out with
 
 | Problem | What to check |
 | --- | --- |
-| `check-site` shows FAIL, or the log says the site is unreachable | The NAS needs outbound HTTPS to `www.singaporepools.com.sg` and `online2.singaporepools.com`. Test from the NAS: `docker compose run --rm huat-bot python -c "import requests; print(requests.get('https://www.singaporepools.com.sg', timeout=30).status_code)"`. Check firewall rules, DNS filters and any VPN on the NAS. When the site cannot be reached the bot carries on with the data it already has and says so. Only a first run with no data at all stops, with a short Telegram notice. A single draw page that keeps failing is skipped after 3 runs (listed under `skip` in `Data/state.json`; delete it there to try again). |
+| `check-site` shows FAIL, or the log says the site is unreachable | The NAS needs outbound HTTPS to `www.singaporepools.com.sg` and `online2.singaporepools.com`. Test from the NAS: `docker compose run --rm huat-bot python -c "import requests; print(requests.get('https://www.singaporepools.com.sg', timeout=30).status_code)"`. Check firewall rules, DNS filters and any VPN on the NAS. When the site cannot be reached the bot carries on with the data it already has and says so. Only a first run with no data at all stops, with a short Telegram notice. A single draw page that keeps failing (gone, or showing something the bot cannot read) is skipped after 3 runs in a row (listed under `skip` in `Data/state.json`; delete it there to try again). Fetch trouble such as timeouts, rate limits or server errors never puts a draw on that list. |
 | Only the prize pages fail | They are not critical. The bot uses its built in prize values and the report says the rules were not confirmed. |
 | `Permission denied` writing to `/vault` | `PUID` and `PGID` must be a NAS user with read and write access to the vault folder. Over SSH, `ls -ln /volume1/Obsidian/MyVault` shows the owner numbers. Give your user read and write on the shared folder in Control Panel, or if the folder is yours, `sudo chown -R 1000:10 "/volume1/Obsidian/MyVault/Huat Bot"` with your own numbers. |
 | Files appear on the NAS but not on the phone | The vault sync is not picking them up. See [step 3](#3-make-sure-the-vault-is-synced-to-your-devices). |
-| Nothing was posted | Check the activity log in `Huat Bot/Logs`. Common reasons: the result was already posted (the log says "Nothing new since the last post"; the scheduler never posts a draw twice, see `last_posted` in `Data/state.json`; run `python -m huatbot run` by hand to post again); `DRY_RUN=1`; the token or chat id is missing (the run becomes a dry run and says so); it was not a draw day; the result was still not out after the retry window (you get a short notice instead). |
+| Nothing was posted | Check the activity log in `Huat Bot/Logs`. Common reasons: the result was already posted (the log says "Nothing new since the last post"; the scheduler never posts a draw twice, see `last_posted` in `Data/state.json`; run `python -m huatbot run` by hand to post again); `DRY_RUN=1` (after changing `.env`, run `docker compose up -d`; a restart keeps the old value); the token or chat id is missing (the run becomes a dry run and says so); it was not a draw day; the result was still not out after the retry window (you get a short notice instead). |
 | Telegram says `chat not found` or `Forbidden` | The bot is not an admin of the channel, or the chat id is wrong. For a private channel the id starts with `-100`. |
 | Times in the log are 8 hours off | The container clock is in UTC. Compose sets `TZ=Asia/Singapore`; if you run the image some other way, pass `-e TZ=Asia/Singapore`. The schedule itself always uses Singapore time, and `RUN_AT` is Singapore time. Also check the NAS clock (Control Panel, time settings, sync with an NTP server). |
 | The run happens at the wrong time | `RUN_AT` is a 24 hour time such as `19:30`. A bad value falls back to 19:30 with a warning in the log. |

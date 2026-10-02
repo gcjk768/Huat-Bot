@@ -27,13 +27,16 @@ import os
 import sys
 import time
 from collections.abc import Callable
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
-from . import __version__, runner, scheduler
+import pandas as pd
+
+from . import __version__, runner, scheduler, telegram
 from . import fetch as site
 from .http import Fetcher
 from .models import RunResult
+from .store import load_fourd, load_toto
 from .textfmt import plural
 from .vault import SG, Vault
 
@@ -137,6 +140,26 @@ def cmd_run(args: argparse.Namespace, dry_run: bool) -> int:
     return 0 if result.ok else 1
 
 
+def draw_done(vault: Vault, game: str, day: date, posting: bool) -> bool:
+    """True when the newest stored ``game`` draw is from ``day`` (or later) and, when posting is
+    on, it has been posted (``last_posted`` in state.json). The scheduler runs a game again
+    while this is False, so a result page that failed or a Telegram outage is retried."""
+    df = load_toto(vault.toto_csv) if game == "toto" else load_fourd(vault.fourd_csv)
+    if df.empty:
+        return False
+    newest = df.sort_values("draw_number").iloc[-1]
+    stored_day = pd.Timestamp(newest["draw_date"])
+    if pd.isna(stored_day) or stored_day.date() < day:
+        return False
+    if not posting:
+        return True
+    posted = vault.load_state().get("last_posted") or {}
+    try:
+        return int(posted.get(game)) >= int(newest["draw_number"])
+    except (TypeError, ValueError):
+        return False
+
+
 def cmd_serve(args: argparse.Namespace, dry_run: bool) -> int:
     if args.no_fetch:
         print("serve checks the Singapore Pools site for new results, so it cannot be used with --no-fetch.",
@@ -147,13 +170,18 @@ def cmd_serve(args: argparse.Namespace, dry_run: bool) -> int:
     fetcher = make_fetcher()
     vault.ensure_layout(dict(runner.TEMPLATES))
     quiet = dry_run or args.no_post
+    # runner.run treats a missing token as a dry run, so nothing is posted then either.
+    posting = not quiet and all(telegram.config_from_env())
+    games = _games(args)
 
     def run_fn(games: tuple[str, ...]) -> RunResult:
         return runner.run(games, dry_run=dry_run, fetch=True, post=not args.no_post, vault=vault,
                           fetcher=fetcher, out=print, force_post=False)
 
     def check_fn(game: str):
-        return site.latest_on_site(fetcher, game)[1]
+        # The date counts only once the result page is complete (TOTO winning shares table,
+        # all 23 4D numbers), so a page published in parts is waited for, not stored half done.
+        return site.latest_complete_date(fetcher, game)
 
     def refresh_fn() -> dict:
         return runner.refresh_next_draws(vault, fetcher)
@@ -161,12 +189,16 @@ def cmd_serve(args: argparse.Namespace, dry_run: bool) -> int:
     def notify_fn(text: str) -> bool:
         return runner.notify(text, dry_run=quiet, out=print)
 
+    def done_fn(game: str, day: date) -> bool:
+        return draw_done(vault, game, day, posting)
+
     for w in config.warnings:
         print(f"Warning: {w}")
-    print(f"Huat Bot scheduler started. {config.describe()}. Vault folder: {vault.base}")
+    only = "" if set(games) == set(runner.GAMES) else f" Only {' and '.join(runner.LABELS[g] for g in games)} is followed."
+    print(f"Huat Bot scheduler started. {config.describe()}.{only} Vault folder: {vault.base}")
     try:
         scheduler.serve(run_fn, check_fn, refresh_fn, notify_fn, vault.log,
-                        lambda: datetime.now(SG), time.sleep, config)
+                        lambda: datetime.now(SG), time.sleep, config, done_fn=done_fn, games=games)
     except KeyboardInterrupt:
         print("Scheduler stopped.")
     finally:

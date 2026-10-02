@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime
 
+import pandas as pd
 import pytest
 import yaml
 
@@ -94,9 +96,15 @@ def test_fourd_draw_note_keeps_leading_zeros(ctx):
 def test_dashboard_links_everything(ctx):
     rel, fm, body = _check_note(notes.dashboard_note(ctx))
     assert rel == "Dashboard.md"
-    for name in (REPORT_NAME, "Ledger", "Tickets", "Settings", LOG_NAME, TOTO_SUGGESTION, FOURD_SUGGESTION,
-                 "2026-10-01 TOTO 4123", "2026-09-30 4D 5432"):
+    for name in (REPORT_NAME, "Ledger", "Tickets", "Settings", LOG_NAME):
         assert f"[[{name}]]" in body, name
+    # Draw and suggestion notes are linked with their folder (a draw note and the suggestion
+    # note made before that draw share a file name); in tables the alias pipe is escaped.
+    for name in (TOTO_SUGGESTION, FOURD_SUGGESTION):
+        assert f"[[Suggestions/{name}|{name}]]" in body, name
+        assert f"[[Suggestions/{name}\\|{name}]]" in body, name
+    for folder, name in (("Draws/TOTO", "2026-10-01 TOTO 4123"), ("Draws/4D", "2026-09-30 4D 5432")):
+        assert f"[[{folder}/{name}\\|{name}]]" in body, name
     assert fm["buy_signal"] == ctx.buy_signal.label
     assert fm["next_toto_draw"] == 4124 and fm["next_toto_date"] == "2026-10-05"
     assert fm["next_4d_draw"] == 5433
@@ -110,7 +118,7 @@ def test_dashboard_without_next_draw_info(ctx):
     bare = variant(ctx, next_toto=None, next_fourd=None, buy_signal=None)
     _, fm, body = _check_note(notes.dashboard_note(bare))
     assert "regular schedule" in body
-    assert f"[[{TOTO_SUGGESTION}]]" in body  # date worked out from the TOTO draw days
+    assert f"[[Suggestions/{TOTO_SUGGESTION}|{TOTO_SUGGESTION}]]" in body  # date worked out from the TOTO draw days
     assert fm["buy_signal"] is None
 
 
@@ -236,7 +244,8 @@ def test_write_all_updates_changed_notes_only(tmp_path, ctx, report_md):
     later = variant(ctx, commentary="Second run.", new_draws={})
     written = notes.write_all(vault, later, report.full_report(later))
     assert written == [f"Reports/{REPORT_NAME}.md"]
-    assert any("Updated [[2026-10-01 1930 Report]]" in row for row in _log_rows(vault, "NOTE"))
+    assert any("Updated [[Reports/2026-10-01 1930 Report\\|2026-10-01 1930 Report]]" in row
+               for row in _log_rows(vault, "NOTE"))
 
 
 def test_write_all_caps_draw_notes_at_backfill(tmp_path, ctx, report_md):
@@ -253,11 +262,47 @@ def test_write_all_caps_draw_notes_at_backfill(tmp_path, ctx, report_md):
     assert len(list(vault.path("Draws/TOTO").glob("*.md"))) == 3
 
 
-def test_write_all_without_backfill_writes_no_draw_notes(tmp_path, ctx, report_md):
+def test_write_all_without_backfill_still_writes_the_newest_draw_note(tmp_path, ctx, report_md):
+    # The Dashboard and the report link to the newest draw note, so it is always written.
     vault = Vault(tmp_path / "vault")
     written = notes.write_all(vault, variant(ctx, settings=Settings(draw_notes_backfill=0)), report_md)
-    assert not [p for p in written if p.startswith("Draws/")]
+    assert [p for p in written if p.startswith("Draws/")] == ["Draws/TOTO/2026-10-01 TOTO 4123.md",
+                                                             "Draws/4D/2026-09-30 4D 5432.md"]
     assert "Dashboard.md" in written
+    dashboard = vault.read_text("Dashboard.md")
+    for rel in ("Draws/TOTO/2026-10-01 TOTO 4123", "Draws/4D/2026-09-30 4D 5432"):
+        assert f"[[{rel}\\|" in dashboard and vault.exists(rel + ".md")
+
+
+WIKILINK = re.compile(r"\[\[([^\]|\\]+)(?:\\?\|[^\]]*)?\]\]")
+
+
+def test_links_to_draw_and_suggestion_notes_are_unambiguous(tmp_path, ctx):
+    """After the draw a suggestion note was made for is held, the vault holds a draw note and a
+    suggestion note with the same file name: every link to such a name must say which one."""
+    vault = Vault(tmp_path / "vault")
+    notes.write_all(vault, ctx, report.full_report(ctx))  # Thu 1 Oct: suggestions for Mon 5 Oct, TOTO 4124
+    held = ctx.toto.iloc[[-1]].copy()
+    held["draw_number"] = 4124
+    held["draw_date"] = pd.Timestamp("2026-10-05")
+    later = variant(ctx, toto=pd.concat([ctx.toto, held], ignore_index=True), new_draws={"toto": [4124]},
+                    now=datetime(2026, 10, 5, 19, 30, tzinfo=report.SG), next_toto=None, buy_signal=None)
+    notes.write_all(vault, later, report.full_report(later))
+
+    files: dict[str, list[str]] = {}
+    for path in vault.base.rglob("*.md"):
+        files.setdefault(path.stem, []).append(path.relative_to(vault.base).as_posix())
+    assert len(files["2026-10-05 TOTO 4124"]) == 2  # Draws/TOTO and Suggestions
+    checked = 0
+    for path in vault.base.rglob("*.md"):
+        for target in WIKILINK.findall(path.read_text()):
+            name = target.rsplit("/", 1)[-1]
+            if len(files.get(name, [])) > 1:
+                checked += 1
+                assert f"{target}.md" in files[name], (path.name, target)
+    assert checked > 0
+    dashboard = vault.read_text("Dashboard.md")
+    assert "[[Draws/TOTO/2026-10-05 TOTO 4124\\|2026-10-05 TOTO 4124]]" in dashboard
 
 
 def test_write_all_logs_an_error_and_carries_on(tmp_path, ctx, report_md, monkeypatch):

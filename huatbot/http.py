@@ -3,7 +3,13 @@
 ``Fetcher`` sends a browser User Agent, keeps at most ``max_workers`` requests in
 flight, pauses after every request, retries transient failures with exponential
 backoff and slows the whole crawl down when the site pushes back (429 or 5xx),
-easing back to the normal pace once requests succeed again.
+easing back to the normal pace once requests succeed again. When many pages in a row
+fail even after their retries, ``get_many`` stops starting new requests (the site is
+down, so the rest of the batch is reported as not fetched and the next run resumes).
+
+The worker threads belong to the fetcher and are reused by every ``get_many`` call, so a
+long running ``serve`` keeps at most ``max_workers`` sessions (one per worker thread)
+instead of opening new ones for every batch.
 
 The session and the sleep function are injectable so tests never touch the
 network and never sleep for real.
@@ -27,6 +33,7 @@ BACKOFF_CAP = 60.0  # never wait longer than this between attempts
 MAX_PAUSE = 5.0  # the shared polite pause never grows beyond this
 SLOW_DOWN_FLOOR = 0.5  # a slow down always pauses at least this long, even if the base pause is 0
 EASE_AFTER = 3  # halve the pause after this many successes in a row
+STOP_AFTER_FAILURES = 10  # get_many stops starting requests after this many pages in a row failed
 
 DEFAULT_HEADERS = {
     "User-Agent": C.BROWSER_USER_AGENT,
@@ -39,12 +46,13 @@ class FetchError(Exception):
     """A page could not be fetched. The message is short plain English (no URL, no stack noise)."""
 
     def __init__(self, message: str, url: str | None = None, status: int | None = None,
-                 attempts: int = 0, detail: str | None = None) -> None:
+                 attempts: int = 0, detail: str | None = None, transient: bool = False) -> None:
         super().__init__(message)
         self.url = url
         self.status = status
         self.attempts = attempts
         self.detail = detail  # raw exception text, for the log only
+        self.transient = transient  # True when the site kept failing (timeouts, 429, 5xx ...)
 
     @property
     def reason(self) -> str:
@@ -105,6 +113,9 @@ class Fetcher:
         self._lock = threading.Lock()
         self._local = threading.local()  # one requests.Session per worker thread otherwise
         self._own_sessions: list[requests.Session] = []
+        self._pool: ThreadPoolExecutor | None = None  # reused by every get_many call
+        self._failed_in_row = 0  # pages in a row that failed in the current get_many batch
+        self._stopped = False  # get_many gave up on the rest of the batch
         self._pause = self.base_pause
         self._success_streak = 0
         self.stats = {"requests": 0, "retries": 0, "failures": 0, "slow_downs": 0}
@@ -157,8 +168,20 @@ class Fetcher:
                 self._own_sessions.append(sess)
         return sess
 
+    def _executor(self) -> ThreadPoolExecutor:
+        """The fetcher's worker pool, started on first use and kept until ``close``."""
+        with self._lock:
+            if self._pool is None:
+                self._pool = ThreadPoolExecutor(max_workers=self.max_workers, thread_name_prefix="huatbot-fetch")
+            return self._pool
+
     def close(self) -> None:
-        """Close the sessions this fetcher created (an injected session is left alone)."""
+        """Stop the worker pool and close the sessions this fetcher created (an injected
+        session is left alone). A later ``get_many`` starts a fresh pool."""
+        with self._lock:
+            pool, self._pool = self._pool, None
+        if pool is not None:
+            pool.shutdown(wait=True)
         with self._lock:
             sessions, self._own_sessions = self._own_sessions, []
         for sess in sessions:
@@ -234,7 +257,7 @@ class Fetcher:
         self._count("failures")
         plural = "attempt" if attempts_allowed == 1 else "attempts"
         raise FetchError(f"{reason} after {attempts_allowed} {plural}", url=url, status=status,
-                         attempts=attempts_allowed, detail=detail)
+                         attempts=attempts_allowed, detail=detail, transient=True)
 
     def _safe_get(self, url: str) -> str | FetchError:
         try:
@@ -245,23 +268,47 @@ class Fetcher:
             log.exception("Unexpected error fetching %s", url)
             return FetchError("unexpected error while fetching", url=url, detail=repr(exc))
 
+    def _batch_get(self, url: str) -> str | FetchError:
+        """One page of a get_many batch. Once ``STOP_AFTER_FAILURES`` pages in a row have
+        failed after all their retries, the remaining pages are not requested at all."""
+        with self._lock:
+            stopped = self._stopped
+        if stopped:
+            return FetchError("the site stopped answering, so this page was not tried", url=url,
+                              transient=True)
+        result = self._safe_get(url)
+        with self._lock:
+            if isinstance(result, FetchError) and result.transient:
+                self._failed_in_row += 1
+                if self._failed_in_row >= STOP_AFTER_FAILURES and not self._stopped:
+                    self._stopped = True
+                    log.warning("%d pages in a row failed, the site is not answering: the rest of this "
+                                "batch is not requested", self._failed_in_row)
+            else:
+                self._failed_in_row = 0
+        return result
+
     def get_many(self, urls: list[str]) -> dict[str, str | FetchError]:
         """Fetch many pages with at most ``max_workers`` in flight.
 
         Returns url -> page text, or url -> FetchError for pages that failed. Duplicate
-        URLs are fetched once. The result keeps the order of ``urls``.
+        URLs are fetched once. The result keeps the order of ``urls``. When
+        ``STOP_AFTER_FAILURES`` pages in a row fail after their retries, the pages not
+        started yet are returned as FetchError without being requested.
         """
         unique = list(dict.fromkeys(urls))
         if not unique:
             return {}
+        with self._lock:
+            self._failed_in_row = 0
+            self._stopped = False
         results: dict[str, str | FetchError] = {}
-        workers = min(self.max_workers, len(unique))
-        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="huatbot-fetch") as pool:
-            futures = {pool.submit(self._safe_get, url): url for url in unique}
-            done = 0
-            for fut in as_completed(futures):
-                results[futures[fut]] = fut.result()
-                done += 1
-                if done % 100 == 0:
-                    log.info("Fetched %d of %d pages", done, len(unique))
+        pool = self._executor()
+        futures = {pool.submit(self._batch_get, url): url for url in unique}
+        done = 0
+        for fut in as_completed(futures):
+            results[futures[fut]] = fut.result()
+            done += 1
+            if done % 100 == 0:
+                log.info("Fetched %d of %d pages", done, len(unique))
         return {url: results[url] for url in unique}

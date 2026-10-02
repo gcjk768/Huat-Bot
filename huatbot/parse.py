@@ -267,26 +267,73 @@ def parse_toto_result(html: str) -> dict:
         out[f"g{g}_winners"] = 0
 
     table = _first(soup, "table.tableWinningShares")
+    groups_read: set[int] = set()
     if table is not None:
         for tr in table.find_all("tr"):
-            cells = tr.find_all("td")
+            cells = tr.find_all(["td", "th"])  # the group label may be a th cell
             if len(cells) < 3:
-                continue  # header rows use th cells
+                continue
             m = re.search(r"Group\s*(\d)", _cell_text(cells[0]), re.I)
             if not m or not 1 <= int(m.group(1)) <= 7:
-                continue
+                continue  # the header row ("Prize Group", "Share Amount", ...)
             g = int(m.group(1))
             share = parse_money(_cell_text(cells[1]))
             out[f"g{g}_share"] = float("nan") if share is None else float(share)
             out[f"g{g}_winners"] = parse_int(_cell_text(cells[2]))
+            groups_read.add(g)
+    # A single "-" row is a real result (Group 1 with no winner), but every draw has Group 7
+    # winners, so a missing table, missing group rows or an all "-" table means the shares are
+    # not published yet (or the layout changed). Raising keeps the draw out of toto.csv, so it
+    # is fetched again on the next run instead of being stored as a draw with no winners.
+    if len(groups_read) < 7 or out["g7_winners"] <= 0:
+        raise ParseError(f"winning shares table for draw {draw_number} is missing or not published yet")
     return out
 
 
-def _fourd_number(text: str) -> str:
+_FOURD_PLACEHOLDER = re.compile(r"[-\u2013\u2014]+")  # "-", "----" and long dash variants
+
+
+def _fourd_number(text: str, what: str = "4D number") -> str:
+    """A 4D cell as a 4 character string; "" for an empty cell or a dash placeholder.
+
+    Raises ParseError for anything else (text, or more than 4 digits), so a changed layout is
+    not stored as wrong numbers.
+    """
     s = re.sub(r"\s+", "", text or "")
-    if not s.isdigit():
-        return ""  # "-", "----", "" and anything else that is not a number
-    return s.zfill(4) if len(s) <= 4 else s
+    if not s or _FOURD_PLACEHOLDER.fullmatch(s):
+        return ""
+    if not s.isdigit() or len(s) > 4:
+        raise ParseError(f"{what} {s!r} is not a 4 digit number")
+    return s.zfill(4)
+
+
+def _fourd_prize_list(body, label: str, draw_number: int) -> list[str]:
+    """The 10 starter or consolation numbers of a 4D page, in page order.
+
+    Cells holding a number or a dash placeholder count (a placeholder stays a blank in its
+    place); label cells are skipped, and empty spacer cells too when there are more than 10
+    cells. Anything other than exactly 10 cells, or 10 with no number at all, raises.
+    """
+    if body is None:
+        raise ParseError(f"{label} numbers not found for 4D draw {draw_number}")
+    items: list[tuple[str, bool]] = []  # (value, empty cell)
+    for td in body.find_all("td"):
+        s = re.sub(r"\s+", "", _cell_text(td))
+        if not s:
+            items.append(("", True))
+        elif _FOURD_PLACEHOLDER.fullmatch(s):
+            items.append(("", False))
+        elif s.isdigit():
+            items.append((_fourd_number(s, f"{label} number"), False))
+        # any other text is a label or heading cell
+    if len(items) > 10:
+        items = [item for item in items if not item[1]]  # drop empty spacer cells
+    values = [v for v, _ in items]
+    if len(values) != 10 or not any(values):
+        found = sum(1 for v in values if v)
+        raise ParseError(f"{found} {label} numbers were read for 4D draw {draw_number} "
+                         f"({len(values)} cells), expected 10; the layout may have changed")
+    return values
 
 
 def parse_fourd_result(html: str) -> dict:
@@ -295,12 +342,9 @@ def parse_fourd_result(html: str) -> dict:
     draw_number, draw_date = _draw_header(soup)
     out: dict = {"draw_number": draw_number, "draw_date": draw_date}
     for key, cls in (("first", "tdFirstPrize"), ("second", "tdSecondPrize"), ("third", "tdThirdPrize")):
-        out[key] = _fourd_number(_cell_text(_first(soup, f"td.{cls}")))
+        out[key] = _fourd_number(_cell_text(_first(soup, f"td.{cls}")), f"4D {key} prize")
     for key, cls in (("starter", "tbodyStarterPrizes"), ("consolation", "tbodyConsolationPrizes")):
-        body = _first(soup, f"tbody.{cls}")
-        cells = body.find_all("td") if body is not None else []
-        values = [_fourd_number(_cell_text(td)) for td in cells][:10]
-        values += [""] * (10 - len(values))
+        values = _fourd_prize_list(_first(soup, f"tbody.{cls}"), key, draw_number)
         for i, v in enumerate(values, start=1):
             out[f"{key}_{i}"] = v
     if not any(out[k] for k in out if k not in ("draw_number", "draw_date")):
@@ -399,8 +443,16 @@ def _group_segments(text: str) -> dict[int, list[str]]:
 
 
 _OF_SALES = re.compile(r"\s*of\s+(?:the\s+)?(?:total\s+|gross\s+)?(?:ticket\s+)?(?:sales|turnover)", re.I)
-_MINIMUM = re.compile(r"(?:minimum|min\.|at least|guaranteed)[^$%]{0,30}(\$\s*\d[\d,]*(?:\.\d+)?(?:\s*million)?)",
-                      re.I)
+_MINIMUM = re.compile(r"(?:minimum|min\.|at least|guaranteed)[^$%]{0,30}(" + _DOLLAR.pattern + ")", re.I)
+MIN_GROUP1_RANGE = (100_000.0, 50_000_000.0)  # a Group 1 minimum outside this is a misread
+
+
+def _min_group1(match: re.Match | None) -> float | None:
+    """The Group 1 minimum from a _MINIMUM match, or None when it is missing or implausible."""
+    value = parse_money(match.group(1)) if match else None
+    if value is None or not MIN_GROUP1_RANGE[0] <= value <= MIN_GROUP1_RANGE[1]:
+        return None
+    return float(value)
 
 
 def _group_pct(text: str, strict: bool) -> float | None:
@@ -458,8 +510,7 @@ def parse_toto_prize_structure(html: str) -> dict | None:
             if value is not None:
                 pct[g] = value
             if g == 1 and min_g1 is None:
-                mm = _MINIMUM.search(rest)
-                min_g1 = parse_money(mm.group(1)) if mm else None
+                min_g1 = _min_group1(_MINIMUM.search(rest))
         elif g >= 5 and g not in fixed:
             value = _group_fixed(rest)
             if value is not None:
@@ -480,9 +531,8 @@ def parse_toto_prize_structure(html: str) -> dict | None:
                 break
     if min_g1 is None:
         for seg in segments.get(1, []):
-            mm = _MINIMUM.search(seg)
-            if mm:
-                min_g1 = parse_money(mm.group(1))
+            min_g1 = _min_group1(_MINIMUM.search(seg))
+            if min_g1 is not None:
                 break
 
     if len(pct) < 4 or sum(pct.values()) >= 1 or pct[1] <= max(pct[2], pct[3], pct[4]):

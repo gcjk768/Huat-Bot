@@ -14,6 +14,7 @@ import pytest
 import yaml
 
 from huatbot import vault as V
+from huatbot.textfmt import has_prose_dashes
 from huatbot.vault import SG, Vault, fmt_log_time, parse_note, render_note
 
 LOG_REL = "Logs/2026-10 Activity.md"
@@ -371,14 +372,15 @@ def test_state_round_trip_and_unchanged_skip(vault, monkeypatch):
     state = {
         "next_draws": {"toto": datetime(2026, 10, 5, 18, 30, tzinfo=SG), "4d": date(2026, 10, 3)},
         "skip": {"toto": {4001, 3999}},
-        "last_posted": np.int64(4123),
+        "last_posted": {"toto": np.int64(4123)},
     }
     vault.save_state(state)
     loaded = vault.load_state()
     assert loaded == {
         "next_draws": {"toto": "2026-10-05T18:30:00+08:00", "4d": "2026-10-03"},
         "skip": {"toto": [3999, 4001]},
-        "last_posted": 4123,
+        "last_posted": {"toto": 4123},
+        "upcoming_draws": {"toto": ["2026-10-05"], "4d": ["2026-10-03"]},
     }
     assert json.loads(vault.state_path.read_text()) == loaded
 
@@ -388,14 +390,63 @@ def test_state_round_trip_and_unchanged_skip(vault, monkeypatch):
     assert calls == []
 
 
+def _activity_rows(vault, event):
+    return [line for p in vault.path("Logs").glob("*Activity.md") for line in p.read_text().splitlines()
+            if f"| {event} |" in line]
+
+
 def test_load_state_survives_corrupt_file(vault, caplog):
     vault.data_dir.mkdir(parents=True)
-    vault.state_path.write_text("{not json")
+    vault.state_path.write_text('{"skip": {"toto": [4000],}}')  # a hand edit with a trailing comma
     with caplog.at_level(logging.WARNING, logger="huatbot.vault"):
         assert vault.load_state() == {}
     assert "not valid JSON" in caplog.text
+    # the broken file is kept for the user, not silently overwritten later
+    assert not vault.state_path.exists()
+    kept = list(vault.data_dir.glob("state.json.bad.*"))
+    assert len(kept) == 1 and kept[0].read_text() == '{"skip": {"toto": [4000],}}'
+    errors = _activity_rows(vault, "ERROR")
+    assert len(errors) == 1 and kept[0].name in errors[0] and "not valid JSON" in errors[0]
+    assert not has_prose_dashes(errors[0])
     vault.state_path.write_text("[1, 2]")
     assert vault.load_state() == {}
+    assert len(_activity_rows(vault, "ERROR")) == 2
+
+
+def test_load_state_drops_wrongly_shaped_values(vault):
+    vault.data_dir.mkdir(parents=True)
+    vault.state_path.write_text(json.dumps({
+        "skip": [4000],  # should be {"toto": [4000]}
+        "fetch_failures": {"toto": {"4001": 1}, "4d": 3},
+        "last_posted": {"toto": 4123},
+        "next_draws": "soon",
+        "last_run": {"ok": True},
+    }))
+    state = vault.load_state()
+    assert state == {"fetch_failures": {"toto": {"4001": 1}}, "last_posted": {"toto": 4123},
+                     "last_run": {"ok": True}}
+    errors = _activity_rows(vault, "ERROR")
+    assert len(errors) == 3
+    assert any("skip is not an object" in e for e in errors)
+    assert any("fetch_failures for 4d" in e for e in errors)
+    assert any("next_draws" in e for e in errors)
+
+
+def test_save_state_keeps_every_announced_draw_date(vault):
+    # Thursday: the next TOTO draw page shows a special draw on Friday.
+    vault.save_state({"next_draws": {"toto": {"draw_datetime": "2026-10-09T18:30:00+08:00"},
+                                     "checked_at": "2026-10-08T19:30:00+08:00"}})
+    # Friday 7.30pm: the page has moved on to Monday, but Friday is remembered.
+    state = vault.load_state()
+    state["next_draws"] = {"toto": {"draw_datetime": "2026-10-12T18:30:00+08:00"},
+                           "checked_at": "2026-10-09T19:30:00+08:00"}
+    vault.save_state(state)
+    assert state["upcoming_draws"] == {"toto": ["2026-10-09", "2026-10-12"]}
+    assert vault.load_state()["upcoming_draws"] == {"toto": ["2026-10-09", "2026-10-12"]}
+    # Saturday: Friday is past and dropped.
+    state["next_draws"]["checked_at"] = "2026-10-10T19:30:00+08:00"
+    vault.save_state(state)
+    assert vault.load_state()["upcoming_draws"] == {"toto": ["2026-10-12"]}
 
 
 def test_number_shaped_strings_are_quoted_for_obsidian():

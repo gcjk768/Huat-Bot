@@ -201,6 +201,7 @@ def post_messages(
     dry_run: bool = False,
     out: Callable[[str], Any] = print,
     pause: float = 1.0,
+    on_sent: Callable[[int], Any] | None = None,
     **kw: Any,
 ) -> bool:
     """Post the messages in order. Returns True only when every message was posted.
@@ -209,6 +210,8 @@ def post_messages(
     rule it breaks) and return False. A missing token or chat id falls back to a dry run with a
     warning. Before posting, every message is checked so nothing is half posted because of a
     bad message (ValueError). A send failure raises TelegramError saying how many went out.
+    ``on_sent(i)`` is called right after message i (1 based) went out, so a caller can record
+    progress and resume after a failure without posting a message twice.
     ``pause`` seconds pass between messages; other keywords go to ``send_message``.
     """
     messages = list(messages)
@@ -251,4 +254,6 @@ def post_messages(
         except TelegramError as exc:
             raise TelegramError(f"Posted {i - 1} of {total} messages, message {i} failed: {exc}") from exc
         log.info("Posted Telegram message %d of %d", i, total)
+        if on_sent is not None:
+            on_sent(i)
     return True

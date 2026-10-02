@@ -26,9 +26,14 @@ state.json keys written here:
                      "4d": {"draw_datetime", ...}} (also read by the scheduler)
 ``last_posted``     {"toto": 4123, "4d": 5432}: newest draw already posted. A scheduled run
                     (``force_post=False``) posts only when a reported game has a newer draw.
+``posting``         {"draws": {"toto": 4123, ...}, "sent": 1, "total": 3}: a set of messages
+                    that was only partly posted; the next post of the same draws resumes
+                    after message ``sent``. Removed once all of them went out.
 ``skip``            {"toto": [...], "4d": [...]}: draw numbers never fetched again. A draw
-                    whose page fails in 3 runs is added automatically (never one of the
-                    newest 10 draws); the lists can also be edited by hand.
+                    whose page fails in 3 runs in a row is added automatically (never one of
+                    the newest 10 draws, and never for fetch trouble such as timeouts, 403,
+                    429 or 5xx, only for a page that is gone or cannot be read); the lists
+                    can also be edited by hand.
 ``fetch_failures``  failed runs per draw, feeding ``skip``
 ``last_run``        when, which games, ok, new draws, dry run or demo
 
@@ -111,6 +116,7 @@ LEDGER_LOG_LIMIT = 20  # settled tickets logged one by one
 SKIP_AFTER_FAILED_RUNS = 3  # a draw page failing in this many runs goes on the skip list
 SKIP_PROTECT_NEWEST = 10  # ... unless it is one of the newest draws on the site
 PRIZE_RULES_MAX_AGE_DAYS = 7
+PRIZE_RULES_CACHE_NAME = "prize_rules.json"
 BACKTEST_CACHE_VERSION = 1
 
 # Demo history: about as long as needed for a 300 draw backtest with 100 draws of warm up.
@@ -269,17 +275,69 @@ def _skip_list(state: dict, game: str) -> set[int]:
     return out
 
 
-def _track_failures(state: dict, game: str, result: UpdateResult, activity: _Activity) -> None:
+class _FailureRecorder:
+    """Passes every call on to the real fetcher and remembers the URLs that failed only because
+    of fetch trouble: no answer, timeouts, connection errors, 403, 408, 429 or 5xx. A page that
+    is gone (HTTP 404 or 410), or one that came back but could not be read, is not recorded.
+    The runner uses this so a site outage or rate limiting never puts draws on the skip list.
+    """
+
+    PERMANENT_STATUS = (404, 410)
+
+    def __init__(self, inner) -> None:
+        self.inner = inner
+        self.transient: set[str] = set()
+
+    def _note(self, url: str, page: Any) -> None:
+        if page is None or (isinstance(page, BaseException)
+                            and getattr(page, "status", None) not in self.PERMANENT_STATUS):
+            self.transient.add(url)
+
+    def get(self, url: str) -> str:
+        try:
+            return self.inner.get(url)
+        except BaseException as exc:
+            self._note(url, exc)
+            raise
+
+    def get_many(self, urls):
+        urls = list(urls)
+        try:
+            pages = self.inner.get_many(urls)
+        except BaseException:
+            self.transient.update(urls)
+            raise
+        for url in urls:
+            self._note(url, pages.get(url))
+        return pages
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.inner, name)
+
+
+def _track_failures(state: dict, game: str, result: UpdateResult, activity: _Activity,
+                    transient: Iterable[int] = ()) -> list[int]:
     """Count the runs in a row in which each draw page failed; after SKIP_AFTER_FAILED_RUNS put the
     draw on the skip list (never one of the newest SKIP_PROTECT_NEWEST draws). A draw that did not
-    fail in this run starts again from zero."""
+    fail in this run starts again from zero. A draw in ``transient`` (or in the result's
+    ``transient_draws``, when the fetch layer provides it) failed only because of fetch trouble:
+    its count is carried over unchanged and it never goes on the skip list for that run.
+    Returns the draws put on the skip list in this run."""
     all_failures = state.get("fetch_failures") or {}
     previous = all_failures.get(game) or {}
     newest = int(result.latest_on_site or 0)
     skip = _skip_list(state, game)
+    transient = {int(n) for n in transient} | {int(n) for n in getattr(result, "transient_draws", None) or ()}
     counts: dict[str, int] = {}
     added = []
     for n in result.failed_draws:
+        if int(n) in transient:
+            try:
+                if str(n) in previous:
+                    counts[str(n)] = int(previous[str(n)])
+            except (TypeError, ValueError):
+                pass
+            continue
         try:
             count = int(previous.get(str(n), 0)) + 1
         except (TypeError, ValueError):
@@ -301,6 +359,7 @@ def _track_failures(state: dict, game: str, result: UpdateResult, activity: _Act
         state["fetch_failures"] = all_failures
     else:
         state.pop("fetch_failures", None)
+    return added
 
 
 def _next_toto_state(nt: NextToto) -> dict:
@@ -407,6 +466,20 @@ def _cached_rules(vault: Vault):
     return prize_rules.load_prize_rules(None)
 
 
+def _rules_text(rules, now: datetime) -> str:
+    """FETCH row for the prize rules: checked this run, reused from the cache, or built in."""
+    checked = _parse_dt(getattr(rules, "checked_at", None))
+    note = _plain(getattr(rules, "source_note", "") or "")
+    if checked is None:
+        head = "Prize rules: built in values"
+    elif rules.checked_at == now.isoformat(timespec="seconds"):
+        head = "Prize rules: the official prize pages were checked this run"
+    else:
+        head = (f"Prize rules: reused Data/{PRIZE_RULES_CACHE_NAME} from {fmt_datetime(checked)} "
+                f"(checked again after {plural(PRIZE_RULES_MAX_AGE_DAYS, 'day')})")
+    return f"{head}. {note}".strip()
+
+
 def _rules_fingerprint(rules) -> str:
     """Short hash of the prize amounts (not the confirmation notes), for the backtest cache key."""
     d = prize_rules.rules_to_dict(rules)
@@ -482,6 +555,18 @@ def _fetch_summary(game: str, result: UpdateResult) -> str:
     return text
 
 
+# Fetch messages that need the user's attention (the rest are routine and summed up in the FETCH row).
+_DRAW_TYPE_LIST_FAILED = "draw list could not be used"  # cascade, Hongbao or special list
+_DATE_MISMATCH = "in the data but"  # "draw 4123 is dated ... in the data but ... on the site"
+
+
+def _notable_messages(result: UpdateResult) -> list[str]:
+    """The fetch messages worth a warning and an ERROR row: a draw type list that could not be
+    used (new draws may then be tagged normal) and a date that differs from the site."""
+    keys = (_DRAW_TYPE_LIST_FAILED, _DATE_MISMATCH)
+    return [_plain(m) for m in result.messages or [] if any(k in str(m) for k in keys)]
+
+
 def _update_from_site(vault: Vault, settings: Settings, state: dict, games: tuple[str, ...], fetcher,
                       now: datetime, activity: _Activity, warnings: list[str]) -> _Data:
     """Step 2: bring the CSVs up to date for ``games`` (plus any game with nothing stored)."""
@@ -491,12 +576,13 @@ def _update_from_site(vault: Vault, settings: Settings, state: dict, games: tupl
         if game not in games and not old.empty:
             continue
         label = LABELS[game]
+        recorder = _FailureRecorder(fetcher)
         try:
             if game == "toto":
-                df, result = site.update_toto(fetcher, old, settings.toto_start_draw,
+                df, result = site.update_toto(recorder, old, settings.toto_start_draw,
                                               skip=_skip_list(state, game), now=now)
             else:
-                df, result = site.update_fourd(fetcher, old, settings.fourd_history_draws,
+                df, result = site.update_fourd(recorder, old, settings.fourd_history_draws,
                                                skip=_skip_list(state, game), now=now)
         except Exception as exc:  # FetchError when the draw list is unreachable, anything else is a bug
             if not isinstance(exc, FetchError):
@@ -510,13 +596,28 @@ def _update_from_site(vault: Vault, settings: Settings, state: dict, games: tupl
             continue
 
         activity(EV_FETCH, _fetch_summary(game, result))
-        _track_failures(state, game, result, activity)
-        if result.failed_draws:
-            warnings.append(f"{label}: {plural(len(result.failed_draws), 'draw')} could not be added "
-                            f"({_span(result.failed_draws)}); they will be tried again on the next run.")
+        url_fn = site.toto_result_url if game == "toto" else site.fourd_result_url
+        transient = [n for n in result.failed_draws if url_fn(n) in recorder.transient]
+        skipped_now = _track_failures(state, game, result, activity, transient)
+        retry = [n for n in result.failed_draws if n not in skipped_now]
+        if retry:
+            warnings.append(f"{label}: {plural(len(retry), 'draw')} could not be added "
+                            f"({_span(retry)}); they will be tried again on the next run.")
+        if skipped_now:
+            warnings.append(f"{label}: {plural(len(skipped_now), 'draw')} ({_span(skipped_now)}) failed in "
+                            f"{SKIP_AFTER_FAILED_RUNS} runs in a row and will not be fetched again (skip "
+                            "list in Data/state.json).")
+        notable = _notable_messages(result)
+        for msg in notable:
+            warnings.append(msg)
+            activity(EV_ERROR, msg.rstrip("."))
         if result.latest_in_csv is not None and not result.verified:
-            warnings.append(f"{label}: the newest stored draw ({result.latest_in_csv}) does not match the "
-                            f"latest draw on the site ({result.latest_on_site}).")
+            if result.latest_in_csv != result.latest_on_site:
+                warnings.append(f"{label}: the newest stored draw ({result.latest_in_csv}) does not match the "
+                                f"latest draw on the site ({result.latest_on_site}).")
+            elif not any(_DATE_MISMATCH in m for m in notable):
+                warnings.append(f"{label}: draw {result.latest_in_csv} has a different date in the stored data "
+                                "than on the site, please check it.")
         if df.empty and not result.new_draws:
             data.problems[game] = "none of the result pages could be read"
         _save_frame(game, df, old, vault, warnings, activity)
@@ -859,14 +960,20 @@ def _log_suggestions(ctx: Context, activity: _Activity) -> None:
                             f"{sig.draw_type} draw{ev}")
 
 
-def _commentary(ctx: Context, demo: bool) -> str | None:
+def _commentary(ctx: Context, demo: bool, activity: _Activity | None = None) -> str | None:
+    """The optional commentary. When COMMENTARY is turned on but nothing usable came back, an
+    ERROR row says so (the container log has the reason)."""
     if demo:
         return None  # a demo never calls out to claude
     try:
-        return commentary.build_commentary(commentary.figures_from_context(ctx))
+        text = commentary.build_commentary(commentary.figures_from_context(ctx))
+        reason = "the container log says why"
     except Exception as exc:  # optional extra, never fatal
         log.warning("Commentary skipped: %s", exc)
-        return None
+        text, reason = None, _error_text(exc)
+    if text is None and activity is not None and commentary.is_enabled():
+        activity(EV_ERROR, f"Commentary is turned on but none was added in this run ({reason})")
+    return text
 
 
 def _has_new(ctx: Context, state: dict) -> bool:
@@ -893,8 +1000,10 @@ def _posted_text(ctx: Context) -> str:
 
 
 def _deliver(messages: list[str], ctx: Context, state: dict, *, dry_run: bool, post: bool, force_post: bool,
-             demo: bool, out: Callable[[str], Any], activity: _Activity) -> tuple[bool, bool]:
-    """Post, print or skip the messages. Returns (posted, ok)."""
+             demo: bool, out: Callable[[str], Any], activity: _Activity,
+             vault: Vault | None = None) -> tuple[bool, bool]:
+    """Post, print or skip the messages. Returns (posted, ok). A set that was only partly
+    posted before (state["posting"], same draws) resumes after the last message that went out."""
     count = plural(len(messages), "message")
     if demo:
         telegram.post_messages(messages, None, None, dry_run=True, out=out)
@@ -912,21 +1021,49 @@ def _deliver(messages: list[str], ctx: Context, state: dict, *, dry_run: bool, p
         return False, True
 
     token, chat_id = telegram.config_from_env()
+    # state["posting"] records how many messages of this set already went out, saved after each
+    # one, so a set that failed half way is finished on the next run instead of posted again.
+    draws = {g: _latest(ctx.toto if g == "toto" else ctx.fourd) for g in ctx.games_drawn}
+    progress = state.get("posting") if isinstance(state.get("posting"), dict) else {}
+    done = 0
+    if progress.get("draws") == draws:
+        try:
+            done = max(0, min(int(progress.get("sent") or 0), len(messages)))
+        except (TypeError, ValueError):
+            done = 0
+
+    def sent(i: int) -> None:
+        state["posting"] = {"draws": draws, "sent": done + i, "total": len(messages)}
+        if vault is not None:
+            try:
+                vault.save_state(state)
+            except Exception as exc:  # the final save in run() tries again
+                log.warning("state.json could not be saved after a message was posted: %s", exc)
+
     try:
-        telegram.post_messages(messages, token, chat_id, dry_run=False, out=out)
+        if done < len(messages):
+            telegram.post_messages(messages[done:], token, chat_id, dry_run=False, out=out, on_sent=sent)
     except Exception as exc:
         log.exception("Posting to Telegram failed")
         msg = f"Posting to Telegram failed: {_error_text(exc)}"
+        if done:
+            msg += f" ({plural(done, 'message')} had already gone out in an earlier run)"
         ctx.warnings.append(msg + ".")
         activity(EV_ERROR, msg)
         return False, False
+    state.pop("posting", None)
     posted = state.setdefault("last_posted", {})
     for game in ctx.games_drawn:
         latest = _latest(ctx.toto if game == "toto" else ctx.fourd)
         if latest is not None:
             posted[game] = latest
     state["last_posted_at"] = ctx.now.isoformat(timespec="seconds")
-    activity(EV_POST, f"Posted {count} to Telegram ({_posted_text(ctx)})")
+    if done:
+        activity(EV_POST, f"Posted the remaining {plural(len(messages) - done, 'message')} to Telegram "
+                          f"({_posted_text(ctx)}); the first {plural(done, 'message')} went out in an "
+                          "earlier run, so they were not posted again")
+    else:
+        activity(EV_POST, f"Posted {count} to Telegram ({_posted_text(ctx)})")
     return True, True
 
 
@@ -1007,6 +1144,9 @@ def run(games=GAMES, *, dry_run: bool = False, fetch: bool = True, post: bool = 
             if not token or not chat_id:
                 msg = ("Telegram is not set up (TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is missing), so this is a "
                        "dry run: the messages are printed, not posted.")
+                if Path(".env").is_file():
+                    msg += (" A .env file is in the working folder, but only docker compose reads it: "
+                            "outside Docker, export its values first (see the README).")
                 warnings.append(msg)
                 log.warning(msg)
                 activity(EV_DRY_RUN, "Telegram is not set up, treating this run as a dry run")
@@ -1023,6 +1163,7 @@ def run(games=GAMES, *, dry_run: bool = False, fetch: bool = True, post: bool = 
                     fetcher = own_fetcher = Fetcher()
                 rules = prize_rules.load_prize_rules(fetcher, cache_path=vault.prize_rules_path,
                                                      max_age_days=PRIZE_RULES_MAX_AGE_DAYS, now=now)
+                activity(EV_FETCH, _rules_text(rules, now))
                 data = _update_from_site(vault, settings, state, games, fetcher, now, activity, warnings)
             else:
                 rules = _cached_rules(vault)
@@ -1066,9 +1207,12 @@ def run(games=GAMES, *, dry_run: bool = False, fetch: bool = True, post: bool = 
 
         toto, fourd = _analysis_frames(data, settings)
         drawn = tuple(g for g in games if not (toto if g == "toto" else fourd).empty)
+        known = len(warnings)
         ctx = build_context(toto, fourd, settings, rules, now=now, next_toto=nt, next_fourd=nf,
                             games_drawn=drawn, new_draws=data.new_draws, warnings=warnings)
         warnings = ctx.warnings  # one list from here on, so later steps add to the report too
+        for w in warnings[known:]:  # analysis parts that failed (each is already a warning)
+            activity(EV_ERROR, _plain(w).rstrip("."))
         _log_suggestions(ctx, activity)
 
         # 4 backtests
@@ -1081,7 +1225,7 @@ def run(games=GAMES, *, dry_run: bool = False, fetch: bool = True, post: bool = 
         check_tickets(ctx, vault, data.toto, data.fourd, save=True, activity=activity)
 
         # 6 commentary, report, notes, state
-        ctx.commentary = _commentary(ctx, demo)
+        ctx.commentary = _commentary(ctx, demo, activity)
         if ctx.commentary:
             activity(EV_NOTE, "Added a short commentary written from the computed figures")
         report_md = report.full_report(ctx)
@@ -1092,7 +1236,7 @@ def run(games=GAMES, *, dry_run: bool = False, fetch: bool = True, post: bool = 
 
         # 7 telegram
         posted, ok = _deliver(messages, ctx, state, dry_run=dry_run, post=post, force_post=force_post,
-                              demo=demo, out=out, activity=activity)
+                              demo=demo, out=out, activity=activity, vault=vault)
         result.posted = posted
         result.ok = ok
         result.new_draws = {k: list(v) for k, v in data.new_draws.items()}

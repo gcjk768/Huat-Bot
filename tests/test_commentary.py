@@ -203,6 +203,18 @@ def test_validate_accepts_scaled_and_cent_forms():
     assert validate_commentary("Jackpot about $3.5 million, 72 cents back per dollar.", FIGURES)
 
 
+def test_whole_number_counts_are_not_scaled_by_100():
+    """A streak of 5 draws or 4 tickets must not let an invented $500 or $400 through."""
+    figures = {"buy_signal": {"draws_with_no_group_1_winner": 5}, "my_tickets": {"tickets": 4},
+               "next_toto": {"draw_time": "Mon 5 Oct 2026, 6.30pm"}, "rpd": "$0.66"}
+    allowed = allowed_numbers(figures)
+    assert Decimal(500) not in allowed and Decimal(400) not in allowed and Decimal(100) not in allowed
+    assert Decimal(66) in allowed  # "$0.66" may still be written as 66 cents
+    assert validate_commentary("After 5 draws with no winner, a $500 prize is waiting.", figures) is None
+    assert validate_commentary("Your 4 tickets won $400.", figures) is None
+    assert validate_commentary("After 5 draws with no winner, 66 cents back per $1.", figures)
+
+
 def test_validate_rejects_invented_numbers():
     assert validate_commentary("The jackpot is $3,600,000 tonight.", FIGURES) is None
     assert validate_commentary("You have a 1 in 54 chance, about 2% better.", FIGURES) is None

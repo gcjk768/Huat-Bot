@@ -41,6 +41,7 @@ from zoneinfo import ZoneInfo
 import yaml
 
 from . import constants as C
+from .scheduler import remember_upcoming
 from .store import atomic_write_text
 
 log = logging.getLogger(__name__)
@@ -54,6 +55,9 @@ LOG_FOLDER = "Logs"
 # Folders created inside the bot folder by ensure_layout (Data is created separately because
 # DATA_DIR may point somewhere else).
 LAYOUT_FOLDERS = ("Draws/TOTO", "Draws/4D", "Reports", "Suggestions", LOG_FOLDER)
+
+# state.json keys that must hold an object with one entry per game.
+_STATE_OBJECT_KEYS = ("next_draws", "last_posted", "skip", "fetch_failures", "upcoming_draws")
 
 LOG_TABLE_HEADER = "| Time | Event | Details |"
 LOG_TABLE_RULE = "| --- | --- | --- |"
@@ -490,7 +494,15 @@ class Vault:
     # Run state (next draw dates, skip lists, last posted ...)
 
     def load_state(self) -> dict:
-        """Contents of Data/state.json, ``{}`` if missing or unreadable (a warning is logged)."""
+        """Contents of Data/state.json, ``{}`` if missing.
+
+        A file that is not valid JSON (often a typo after a hand edit) is not silently thrown
+        away: it is renamed to ``state.json.bad.<time>`` and an ERROR row in the activity log
+        says so, then the bot starts from an empty state. Keys that must hold an object per
+        game (``next_draws``, ``last_posted``, ``skip``, ``fetch_failures``,
+        ``upcoming_draws``) but hold something else are dropped with an ERROR row, so one
+        wrongly shaped value cannot break every fetch.
+        """
         text = self._read(self.state_path)
         if text is None or not text.strip():
             return {}
@@ -498,15 +510,62 @@ class Vault:
             data = json.loads(text)
         except ValueError as exc:
             log.warning("state.json is not valid JSON, starting from an empty state: %s", exc)
+            self._set_aside_state("it is not valid JSON")
             return {}
         if not isinstance(data, dict):
             log.warning("state.json does not hold an object, starting from an empty state")
+            self._set_aside_state("it does not hold a JSON object")
             return {}
+        return self._checked_state(data)
+
+    def _set_aside_state(self, reason: str) -> None:
+        """Rename an unreadable state.json out of the way and say so in the activity log."""
+        now = datetime.now(SG)
+        name = f"{self.state_path.name}.bad.{now:%Y%m%d%H%M%S}"
+        try:
+            self.state_path.replace(self.state_path.with_name(name))
+            kept = f"it was renamed to {name} so you can fix it or copy back what you need"
+        except OSError as exc:
+            log.warning("Could not rename the unreadable state.json: %s", exc)
+            kept = "it could not be renamed and will be replaced on the next save"
+        self.log("ERROR", f"{self.state_path.name} in the data folder could not be read because {reason}, so "
+                          f"{kept}. The bot started from an empty state: the last posted draws, skip lists "
+                          "and fetch failure counts in it are not used.", when=now)
+
+    def _checked_state(self, data: dict) -> dict:
+        """Drop state values that are not in the shape the bot expects (each one is logged)."""
+        problems: list[str] = []
+        for key in _STATE_OBJECT_KEYS:
+            if key in data and not isinstance(data[key], dict):
+                problems.append(f"{key} is not an object with one entry per game")
+                del data[key]
+        for key, kind, word in (("skip", list, "a list of draw numbers"),
+                                ("fetch_failures", dict, "an object")):
+            for game, value in list(data.get(key, {}).items()):
+                if not isinstance(value, kind):
+                    problems.append(f"{key} for {game} is not {word}")
+                    del data[key][game]
+        for problem in problems:
+            log.warning("state.json: %s, so it was ignored", problem)
+            hint = ' (it should look like "skip": {"toto": [4000], "4d": []})' if problem.startswith("skip") else ""
+            self.log("ERROR", f"{self.state_path.name}: {problem}, so it was ignored{hint}")
         return data
 
     def save_state(self, state: dict) -> None:
-        """Atomically write Data/state.json (skipped when unchanged). Dates become ISO strings."""
+        """Atomically write Data/state.json (skipped when unchanged). Dates become ISO strings.
+
+        Every next draw date in the state being saved and in the file it replaces is also kept
+        in ``upcoming_draws`` (``scheduler.remember_upcoming``), so a special draw date
+        survives a restart or a next draw page that has already moved on. ``state`` is
+        updated in place with that key.
+        """
+        old = self._read(self.state_path)
+        try:
+            previous = json.loads(old) if old and old.strip() else {}
+        except ValueError:
+            previous = {}
+        remember_upcoming(state, previous if isinstance(previous, dict) else {})
         text = json.dumps(state, indent=2, sort_keys=True, ensure_ascii=False, default=_json_default) + "\n"
-        if self._read(self.state_path) == text:
+        if old == text:
             return
         self._write(self.state_path, text)

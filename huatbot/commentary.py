@@ -307,14 +307,17 @@ def _walk_values(obj: Any) -> Iterable[Any]:
 def allowed_numbers(figures: dict) -> set[Decimal | str]:
     """Every number (and time) the commentary may mention: those in the figure values, plus 1.
 
-    For a figure below 10 the value times 100 is allowed too, so "$0.66" may be written as
-    "66 cents" and a 0.054 ratio as "5.4%". Raw floats may also appear rounded to 0 to 2 places.
+    For a figure below 10 that is not a whole number (per $1 amounts, shares, ratios) the value
+    times 100 is allowed too, so "$0.66" may be written as "66 cents" and a 0.054 ratio as
+    "5.4%". Whole numbers (counts such as a no winner streak or a ticket count) never are, so a
+    streak of 5 cannot let an invented "$500" through. Raw floats may also appear rounded to 0
+    to 2 places.
     """
     allowed: set[Decimal | str] = set(ALWAYS_ALLOWED)
 
     def add(value: Decimal) -> None:
         allowed.add(value)
-        if 0 < abs(value) < 10:
+        if 0 < abs(value) < 10 and value != value.to_integral_value():
             allowed.add(value * 100)
 
     for v in _walk_values(figures):
@@ -402,6 +405,11 @@ def _mode(mode: str | None) -> str:
     if mode is None:
         mode = os.environ.get("COMMENTARY", DEFAULT_MODE)
     return (mode or "").strip().lower()
+
+
+def is_enabled(mode: str | None = None) -> bool:
+    """True when commentary is turned on (mode None reads env COMMENTARY)."""
+    return _mode(mode) not in OFF_MODES
 
 
 def build_commentary(

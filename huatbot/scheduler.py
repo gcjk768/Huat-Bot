@@ -2,8 +2,11 @@
 
 TOTO draws on Monday and Thursday, 4D on Wednesday, Saturday and Sunday, at 6.30pm
 Singapore time, plus special draws on other days (read from the next draw pages and kept
-in the vault's state.json). The bot runs at 7.30pm on a draw day; if the new result is
-not on the site yet it checks again every 10 minutes for up to 2 hours.
+in the vault's state.json under ``upcoming_draws``, see ``remember_upcoming``). The bot runs
+at 7.30pm on a draw day (or an hour after a draw announced for later that evening); if the
+new result is not on the site yet it checks again every 10 minutes for up to 2 hours. Each
+game is run as soon as its result is out, and run again at the next check while the run
+did not store or post it.
 
 Every function takes its clock (``now_fn``) and sleep (``sleep_fn``) as arguments, so the
 tests drive whole days with a fake clock and never sleep for real.
@@ -29,9 +32,12 @@ GAME_WEEKDAYS = {"toto": tuple(C.TOTO_WEEKDAYS), "4d": tuple(C.FOURD_WEEKDAYS)}
 GAME_LABELS = {"toto": "TOTO", "4d": "4D"}
 # Other spellings of the game keys that may appear in state.json.
 _STATE_KEYS = {"toto": ("toto", "TOTO"), "4d": ("4d", "4D", "fourd")}
+# state.json key holding every announced draw date that is not past yet (see remember_upcoming).
+UPCOMING_KEY = "upcoming_draws"
 
 MAX_SLEEP_CHUNK = 300.0  # sleep at most 5 minutes at a time, so a clock jump or NAS sleep is noticed
 MAX_RETRY_HOURS = 12.0  # keeps one cycle (19:30 plus the window) clear of the next day's run
+RESULT_DELAY = timedelta(hours=1)  # results are on the site about an hour after the draw (6.30pm, 7.30pm)
 
 _DAY_ABBR = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 _MONTH_ABBR = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
@@ -116,17 +122,61 @@ def _dates_in(value: Any) -> set[date]:
     return {d} if d is not None else set()
 
 
-def _next_draw_dates(state: Mapping | None, game: str) -> set[date]:
-    """Next draw date(s) for a game from ``state["next_draws"]``."""
+def _game_dates(state: Mapping | None, section: str, game: str) -> set[date]:
+    """Dates for a game in ``state[section]`` (any of the game's key spellings)."""
     if not isinstance(state, Mapping):
         return set()
-    next_draws = state.get("next_draws")
-    if not isinstance(next_draws, Mapping):
+    entries = state.get(section)
+    if not isinstance(entries, Mapping):
         return set()
     out: set[date] = set()
     for key in _STATE_KEYS[game]:
-        out |= _dates_in(next_draws.get(key))
+        out |= _dates_in(entries.get(key))
     return out
+
+
+def _next_draw_dates(state: Mapping | None, game: str) -> set[date]:
+    """Draw date(s) known for a game: ``state["next_draws"]`` (what the next draw page showed
+    last) plus ``state["upcoming_draws"]`` (every announced date not yet past)."""
+    return _game_dates(state, "next_draws", game) | _game_dates(state, UPCOMING_KEY, game)
+
+
+def _checked_on(state: Mapping) -> date | None:
+    """Day of the newest check recorded in the state (next draw pages read, or a run)."""
+    stamps = []
+    next_draws = state.get("next_draws")
+    if isinstance(next_draws, Mapping):
+        stamps.append(next_draws.get("checked_at"))
+    last_run = state.get("last_run")
+    if isinstance(last_run, Mapping):
+        stamps.append(last_run.get("at"))
+    days = [d for d in (_as_date(s) for s in stamps) if d is not None]
+    return max(days) if days else None
+
+
+def remember_upcoming(state: dict, previous: Mapping | None = None) -> dict:
+    """Keep every announced draw date in ``state["upcoming_draws"]`` (``{"toto": [ISO dates],
+    "4d": [...]}``) and return ``state``.
+
+    The next draw page only ever shows one date per game and every refresh replaces it, so a
+    special draw announced on Thursday for Friday is gone from ``next_draws`` once the page
+    moves on to Monday (Friday's draw is at 6.30pm, before the 7.30pm run). The dates in
+    ``previous`` (the state being replaced) and in ``state`` are merged with the ones already
+    kept; dates before the day of the newest check in ``state`` are dropped.
+    """
+    if not isinstance(state, dict):
+        return state
+    today = _checked_on(state)
+    upcoming: dict[str, list[str]] = {}
+    for game in GAMES:
+        dates = _next_draw_dates(previous, game) | _next_draw_dates(state, game)
+        if today is not None:
+            dates = {d for d in dates if d >= today}
+        if dates:
+            upcoming[game] = [d.isoformat() for d in sorted(dates)]
+    if upcoming or UPCOMING_KEY in state:
+        state[UPCOMING_KEY] = upcoming
+    return state
 
 
 # Public functions
@@ -135,10 +185,10 @@ def _next_draw_dates(state: Mapping | None, game: str) -> set[date]:
 def games_on(d: date, state: dict | None) -> tuple[str, ...]:
     """Games drawn on day ``d``, in the order ("toto", "4d").
 
-    A game counts when ``d`` is one of its regular weekdays, or when ``d`` is the next draw
-    date recorded for it in ``state["next_draws"]`` (special draws on other days). State
-    values are ISO strings such as ``"2026-10-09T18:30:00+08:00"`` (dates, lists of them, or
-    dicts holding them also work).
+    A game counts when ``d`` is one of its regular weekdays, or when ``d`` is a draw date
+    recorded for it in ``state["next_draws"]`` or ``state["upcoming_draws"]`` (special draws on
+    other days). State values are ISO strings such as ``"2026-10-09T18:30:00+08:00"`` (dates,
+    lists of them, or dicts holding them also work).
     """
     if isinstance(d, datetime):
         d = _to_sg(d).date()
@@ -187,41 +237,72 @@ def _result_ready(check: Callable[[str], Any], game: str, d: date) -> bool:
 def wait_for_results(games: Iterable[str], d: date, check: Callable[[str], Any],
                      now_fn: Callable[[], datetime], sleep_fn: Callable[[float], Any],
                      retry_minutes: float = C.DEFAULT_RETRY_MINUTES,
-                     retry_hours: float = C.DEFAULT_RETRY_HOURS) -> dict[str, bool]:
+                     retry_hours: float = C.DEFAULT_RETRY_HOURS, *,
+                     on_ready: Callable[[tuple[str, ...], dict[str, datetime | None]], Iterable[str]] | None = None,
+                     start_at: Mapping[str, datetime] | None = None) -> dict[str, bool]:
     """Wait until each game's result for day ``d`` is on the site, or the window runs out.
 
     The first check is immediate. Checks repeat every ``retry_minutes`` (timed from the first
     check, so slow checks do not make the spacing drift) while they fall within
     ``retry_hours`` of the first check; with the defaults that is 13 checks at 0, 10, ... 120
     minutes. A game that is ready is not checked again. Returns ``{game: ready}``.
+
+    ``start_at`` (optional, per game) delays a game's first check, for a draw held later in
+    the evening; its window then runs from that time. ``on_ready(games, retry_at)`` (optional)
+    is called as soon as a check finds results out, so a game is handled at once instead of
+    waiting for the others. It returns the games it finished; a game it did not finish (the
+    run could not store or post it) is passed to it again at that game's next check, while
+    the window lasts. ``retry_at`` gives each game's next check time, or None after the last.
     """
     games = tuple(games)
     status = {g: False for g in games}
     if not games:
         return status
-    start = _to_sg(now_fn())
-    deadline = start + timedelta(hours=max(float(retry_hours), 0.0))
+    first = _to_sg(now_fn())
+    window = timedelta(hours=max(float(retry_hours), 0.0))
     interval = timedelta(minutes=float(retry_minutes)) if retry_minutes and retry_minutes > 0 else None
+    start = {g: max(first, _to_sg(start_at[g])) if start_at and start_at.get(g) else first for g in games}
+    next_at = dict(start)
+    checks = {g: 0 for g in games}
+    active = set(games)
 
-    attempt = 0
-    while True:
-        attempt += 1
-        for game in games:
-            if not status[game]:
-                status[game] = _result_ready(check, game, d)
-        waiting = [GAME_LABELS.get(g, g) for g in games if not status[g]]
-        if not waiting:
-            log.info("Results for %s are out (check %d)", _fmt_day(d), attempt)
-            break
+    def following(g: str) -> datetime | None:
+        """Time of the check after the current one, or None when the window is over."""
         if interval is None:
-            break
-        next_at = start + interval * attempt
-        if next_at > deadline:
-            log.info("Gave up waiting for %s after %d checks", " and ".join(waiting), attempt)
-            break
-        log.info("%s result for %s not out yet (check %d), next check at %s",
-                 " and ".join(waiting), _fmt_day(d), attempt, _fmt_clock(next_at.time()))
-        sleep_until(next_at, now_fn, sleep_fn)
+            return None
+        nxt = start[g] + interval * (checks[g] + 1)
+        return nxt if nxt <= start[g] + window else None
+
+    while active:
+        sleep_until(min(next_at[g] for g in active), now_fn, sleep_fn)
+        now = _to_sg(now_fn())
+        due = [g for g in games if g in active and next_at[g] <= now]
+        for g in due:
+            if not status[g]:
+                status[g] = _result_ready(check, g, d)
+        out = tuple(g for g in due if status[g])
+        finished = set(out)
+        if out and on_ready is not None:
+            try:
+                finished = set(on_ready(out, {g: following(g) for g in out}) or ()) & finished
+            except Exception:  # a broken hook must not end the wait: try again at the next check
+                log.exception("Handling the %s result failed", " and ".join(GAME_LABELS.get(g, g) for g in out))
+                finished = set()
+        for g in due:
+            nxt = following(g)
+            checks[g] += 1
+            label = GAME_LABELS.get(g, g)
+            if g in finished:
+                log.info("%s result for %s is out (check %d)", label, _fmt_day(d), checks[g])
+                active.discard(g)
+            elif nxt is None:
+                log.info("Gave up on the %s result for %s after %d checks", label, _fmt_day(d), checks[g])
+                active.discard(g)
+            else:
+                next_at[g] = nxt
+                if not status[g]:
+                    log.info("%s result for %s not out yet (check %d), next check at %s",
+                             label, _fmt_day(d), checks[g], _fmt_clock(nxt.time()))
     return status
 
 
@@ -312,16 +393,31 @@ def _first_run_at(now: datetime, config: SchedulerConfig) -> datetime:
     return next_run_at(local, config.run_time)
 
 
+def _names(games: Iterable[str]) -> str:
+    return " and ".join(GAME_LABELS.get(g, g) for g in games)
+
+
 def _missing_message(missing: tuple[str, ...], day: date, config: SchedulerConfig) -> str:
-    """Plain, dash free notice that a result never appeared within the retry window."""
-    names = " and ".join(GAME_LABELS.get(g, g) for g in missing)
+    """Plain, dash free notice that a result never appeared within the retry window. The
+    next run of that game stores the draw, but message 1 only shows the newest draw, so the
+    notice does not promise a post."""
     one = len(missing) == 1
     return (
-        f"{names} {'result' if one else 'results'} for {_fmt_day(day)} "
+        f"{_names(missing)} {'result' if one else 'results'} for {_fmt_day(day)} "
         f"{'is' if one else 'are'} still not on the Singapore Pools site after "
         f"{_fmt_window(config.retry_minutes, config.retry_hours)}, so "
-        f"{'it was' if one else 'they were'} not posted. The next run will pick "
-        f"{'it' if one else 'them'} up."
+        f"{'it was' if one else 'they were'} not posted. {'It' if one else 'They'} will be stored "
+        f"on the next {_names(missing)} {'run' if one else 'runs'} but not posted."
+    )
+
+
+def _failed_message(failed: tuple[str, ...], day: date, config: SchedulerConfig) -> str:
+    """Plain, dash free notice that a result is out but no run managed to store or post it."""
+    one = len(failed) == 1
+    return (
+        f"{_names(failed)} {'result' if one else 'results'} for {_fmt_day(day)} "
+        f"{'is' if one else 'are'} on the Singapore Pools site but could not be fetched or posted "
+        f"after {_fmt_window(config.retry_minutes, config.retry_hours)}. See the activity log."
     )
 
 
@@ -347,9 +443,57 @@ def _remember_dates(known: dict[str, set[date]], state: Mapping | None, today: d
         dates -= {d for d in dates if d < today}
 
 
+def _times_in(value: Any) -> list[datetime]:
+    """Draw times (Singapore time) in a state entry. Values without a time of day are skipped."""
+    if value is None:
+        return []
+    if isinstance(value, dict):
+        return [t for key in ("draw_datetime", "datetime") if key in value for t in _times_in(value[key])]
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [t for item in value for t in _times_in(item)]
+    if isinstance(value, datetime):
+        return [] if value != value else [_to_sg(value)]
+    if isinstance(value, str) and len(value.strip()) > 10:
+        try:
+            return [_to_sg(datetime.fromisoformat(value.strip()))]
+        except ValueError:
+            return []
+    return []
+
+
+def _draw_times(state: Mapping | None, day: date) -> dict[str, datetime]:
+    """Announced draw time on ``day`` for each game, from ``state["next_draws"]``."""
+    next_draws = state.get("next_draws") if isinstance(state, Mapping) else None
+    out: dict[str, datetime] = {}
+    if not isinstance(next_draws, Mapping):
+        return out
+    for game in GAMES:
+        for key in _STATE_KEYS[game]:
+            for t in _times_in(next_draws.get(key)):
+                if t.date() == day:
+                    out[game] = t
+    return out
+
+
+_FAILED = object()  # run_fn raised
+
+
+def _is_done(game: str, day: date, result: Any, done_fn: Callable[[str, date], Any] | None) -> bool:
+    """Did the run store (and, when posting is on, post) ``game``'s draw of ``day``?"""
+    if done_fn is not None:
+        try:
+            return bool(done_fn(game, day))
+        except Exception:
+            log.exception("Could not tell whether the %s run is done", GAME_LABELS.get(game, game))
+            return False
+    return result is not _FAILED and bool(getattr(result, "ok", True))
+
+
 def _run_cycle(day: date, known: dict[str, set[date]], run_fn, check_fn, refresh_fn, notify_fn, log_fn,
-               now_fn, sleep_fn, config: SchedulerConfig) -> None:
-    """One scheduled run: refresh next draw dates, decide the games, wait for results, run."""
+               now_fn, sleep_fn, config: SchedulerConfig, done_fn=None, only: tuple[str, ...] | None = None) -> None:
+    """One scheduled run: refresh next draw dates, decide the games, then run each game as soon
+    as its result is out, again every ``retry_minutes`` while the run did not finish it."""
+    cycle_start = _to_sg(now_fn())
     try:
         state = refresh_fn() or {}
     except Exception as exc:
@@ -359,48 +503,86 @@ def _run_cycle(day: date, known: dict[str, set[date]], run_fn, check_fn, refresh
         state = {}
     _remember_dates(known, state, day)
     games = games_on(day, {"next_draws": {g: sorted(ds) for g, ds in known.items()}})
+    if only is not None:
+        games = tuple(g for g in games if g in only)
 
     if not games:
-        _safe_call(log_fn, "SCHEDULE", "No draw today")
+        followed = "" if only is None or set(GAMES) <= set(only) else f"{_names(only)} "
+        _safe_call(log_fn, "SCHEDULE", f"No {followed}draw today")
         return
 
-    labels = " and ".join(GAME_LABELS[g] for g in games)
-    _safe_call(log_fn, "SCHEDULE", f"{labels} draw on {_fmt_day(day)}, checking for the result")
-    status = wait_for_results(games, day, check_fn, now_fn, sleep_fn, config.retry_minutes, config.retry_hours)
-    ready = tuple(g for g in games if status.get(g))
-    missing = tuple(g for g in games if not status.get(g))
+    _safe_call(log_fn, "SCHEDULE", f"{_names(games)} draw on {_fmt_day(day)}, checking for the result")
+    # A draw announced for later than the usual 6.30pm (some special draws) is checked from an
+    # hour after it; draws at the usual time keep the configured run time.
+    start_at: dict[str, datetime] = {}
+    for game, when in _draw_times(state, day).items():
+        if game in games and when.time() > C.DRAW_TIME and when + RESULT_DELAY > cycle_start:
+            start_at[game] = when + RESULT_DELAY
+            _safe_call(log_fn, "SCHEDULE", f"{GAME_LABELS[game]} draw on {_fmt_day(day)} is at "
+                                           f"{_fmt_clock(when.time())}, checking for its result from "
+                                           f"{_fmt_clock(start_at[game].time())}")
 
-    if ready:
+    finished: set[str] = set()
+
+    def on_ready(ready: tuple[str, ...], retry_at: dict[str, datetime | None]) -> set[str]:
+        result: Any = _FAILED
         try:
-            run_fn(games=ready)
+            result = run_fn(games=ready)
         except Exception as exc:
             log.exception("Scheduled run failed")
-            _safe_call(log_fn, "ERROR", f"Run for {' and '.join(GAME_LABELS[g] for g in ready)} failed: {_error_text(exc)}")
+            _safe_call(log_fn, "ERROR", f"Run for {_names(ready)} failed: {_error_text(exc)}")
+        done = {g for g in ready if _is_done(g, day, result, done_fn)}
+        finished.update(done)
+        left = [g for g in ready if g not in done and retry_at.get(g) is not None]
+        if left:
+            one = len(left) == 1
+            when = min(retry_at[g] for g in left)
+            _safe_call(log_fn, "WAIT", f"{_names(left)} {'result' if one else 'results'} for {_fmt_day(day)} "
+                                       f"{'is' if one else 'are'} out but {'was' if one else 'were'} not stored "
+                                       f"or posted yet, trying again at {_fmt_clock(when.time())}")
+        return done
+
+    status = wait_for_results(games, day, check_fn, now_fn, sleep_fn, config.retry_minutes, config.retry_hours,
+                              on_ready=on_ready, start_at=start_at)
+    missing = tuple(g for g in games if not status.get(g))
+    failed = tuple(g for g in games if status.get(g) and g not in finished)
 
     if missing:
         message = _missing_message(missing, day, config)
         _safe_call(log_fn, "WAIT", message)
+        _safe_call(notify_fn, message)
+    if failed:
+        message = _failed_message(failed, day, config)
+        _safe_call(log_fn, "ERROR", message)
         _safe_call(notify_fn, message)
 
 
 def serve(run_fn: Callable[..., Any], check_fn: Callable[[str], Any], refresh_fn: Callable[[], dict],
           notify_fn: Callable[[str], Any], log_fn: Callable[[str, str], Any],
           now_fn: Callable[[], datetime], sleep_fn: Callable[[float], Any],
-          config: SchedulerConfig | None = None, max_cycles: int | None = None) -> None:
+          config: SchedulerConfig | None = None, max_cycles: int | None = None, *,
+          done_fn: Callable[[str, date], bool] | None = None, games: Iterable[str] | None = None) -> None:
     """Run forever (or ``max_cycles`` times): sleep until the run time, then do one cycle.
 
     Each cycle: ``refresh_fn()`` updates and returns the state (next draw dates); the games of
-    the day come from ``games_on``; with no draw it logs "No draw today". Otherwise it waits for
-    the results with ``wait_for_results``, calls ``run_fn(games=ready)`` for the games whose
-    result is out, and for any game still missing logs a WAIT row and sends ``notify_fn`` a plain
-    message. An exception anywhere in a cycle is logged and the loop carries on.
+    the day come from ``games_on`` (only those in ``games`` when it is given); with no draw it
+    logs "No draw today". Otherwise ``wait_for_results`` checks the site and calls
+    ``run_fn(games=...)`` as soon as a game's result is out. A game the run did not finish
+    (``done_fn(game, day)`` is False, or without ``done_fn`` the run raised or returned
+    ``ok=False``) is run again at each later check of the window, with a WAIT row. A game
+    still missing at the end gets a WAIT row and a plain ``notify_fn`` message; a game that
+    was out but never finished gets an ERROR row and a message. An exception anywhere in a
+    cycle is logged and the loop carries on.
 
     Hooks: ``check_fn(game) -> date | None`` (latest draw date on the site), ``log_fn(event,
-    message)`` (the vault activity log), ``notify_fn(text)`` (Telegram).
+    message)`` (the vault activity log), ``notify_fn(text)`` (Telegram), ``done_fn(game, day)``
+    (the draw of ``day`` is stored, and posted when posting is on).
     """
     config = config or SchedulerConfig()
+    only = tuple(g for g in GAMES if g in set(games)) if games is not None else None
     known: dict[str, set[date]] = {}
-    _safe_call(log_fn, "SCHEDULE", f"Scheduler started. {config.describe()}")
+    followed = f". Only {_names(only)} is followed" if only is not None and set(only) != set(GAMES) else ""
+    _safe_call(log_fn, "SCHEDULE", f"Scheduler started. {config.describe()}{followed}")
     cycles = 0
     first = True
     while max_cycles is None or cycles < max_cycles:
@@ -410,7 +592,7 @@ def serve(run_fn: Callable[..., Any], check_fn: Callable[[str], Any], refresh_fn
         sleep_until(target, now_fn, sleep_fn)
         try:
             _run_cycle(target.date(), known, run_fn, check_fn, refresh_fn, notify_fn, log_fn,
-                       now_fn, sleep_fn, config)
+                       now_fn, sleep_fn, config, done_fn, only)
         except Exception as exc:  # never let one bad day stop the scheduler
             log.exception("Scheduled cycle failed")
             _safe_call(log_fn, "ERROR", f"Scheduled run failed: {_error_text(exc)}")

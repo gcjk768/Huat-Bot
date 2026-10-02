@@ -252,7 +252,9 @@ def _share_if_won(group: int, row: Any, rules: PrizeRules, pool: float | None) -
         if winners > 0 and share is not None:
             return share * winners / (winners + 1)
         pct = _rule(rules.group_pool_pct, group, 0.0) or 0.0
-        return float(pct) * pool if pool else 0.0
+        group_total = float(pct) * pool if pool else 0.0
+        # Winners but no share amount captured: the group money is still split with them.
+        return group_total / (winners + 1) if winners > 0 else group_total
     if group in (5, 6, 7):
         return float(_rule(rules.fixed_prizes, group, C.TOTO_FIXED_PRIZES[group]))
     raise ValueError(f"TOTO prize groups are 1 to 7, got {group}")
@@ -263,7 +265,8 @@ def toto_share_if_won(group: int | None, row: Any, rules: PrizeRules) -> float:
 
     Group 1: winners > 0 -> g1_share x w / (w + 1), else the row's jackpot.
     Groups 2 to 4: winners > 0 -> share x w / (w + 1), else group percentage x pool estimate
-    (0 when the pool cannot be estimated). Groups 5 to 7: the fixed prize. None -> 0.
+    (0 when the pool cannot be estimated); winners > 0 with no share amount captured ->
+    group percentage x pool estimate / (w + 1). Groups 5 to 7: the fixed prize. None -> 0.
     Snowballs and a cascaded jackpot that an unwon group would also have collected are not
     added (rare, and the per draw data does not show them reliably).
     """
@@ -286,6 +289,23 @@ def _published_share(group: int, row: Any) -> float | None:
     if share is None or share <= 0 or _int(row, f"g{group}_winners") <= 0:
         return None
     return share
+
+
+def _share_as_published_winner(group: int, row: Any, rules: PrizeRules) -> float | None:
+    """Per board amount for a real ticket when the page shows winners for a Group 1 to 4 but
+    no share amount: the ticket is one of those winners, so the group money is divided by the
+    published number of winners (not one more). None when the page shows no winners."""
+    winners = _int(row, f"g{group}_winners")
+    if winners <= 0:
+        return None
+    if group == 1:
+        total = _num(row, "jackpot") or float(rules.min_group1) * winners
+        return total / winners
+    if group in _POOL_GROUPS:
+        pool = toto_pool_estimate(row, rules)
+        pct = _rule(rules.group_pool_pct, group, 0.0) or 0.0
+        return float(pct) * pool / winners if pool else 0.0
+    return None
 
 
 def _check_toto_bet(bet_type: str, count: int) -> None:
@@ -312,9 +332,11 @@ def toto_ticket_prize(numbers: Any, bet_type: str, units: float, row: Any,
                       rules: PrizeRules) -> PrizeResult:
     """What a real ticket that played this draw won.
 
-    Each winning board earns the share amount published for its group. If the page shows no
-    winner for that group (missing data), ``toto_share_if_won`` is used instead. The total is
-    multiplied by ``units`` (the stake per board, cost / boards).
+    Each winning board earns the share amount published for its group. If the page shows
+    winners but no share amount, the group money is split between the published winners (the
+    ticket is one of them). If the page shows no winner for that group (missing data),
+    ``toto_share_if_won`` is used instead. The total is multiplied by ``units`` (the stake per
+    board, cost / boards).
     """
     nums = _parse_toto_numbers(numbers)
     _check_toto_bet(bet_type, len(nums))
@@ -323,6 +345,8 @@ def toto_ticket_prize(numbers: Any, bet_type: str, units: float, row: Any,
     amount = 0.0
     for group, boards in groups.items():
         per_board = _published_share(group, row)
+        if per_board is None:
+            per_board = _share_as_published_winner(group, row, rules)
         if per_board is None:
             per_board = toto_share_if_won(group, row, rules)
             log.debug("draw %s: no published Group %d share, using %.2f",

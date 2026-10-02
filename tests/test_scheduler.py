@@ -343,8 +343,8 @@ def test_serve_runs_ready_games_and_notifies_missing_ones():
     assert not any(ch in notice for ch in DASHES)
     assert rec.events("WAIT") == [notice]
     assert rec.events("SCHEDULE")[-1] == "TOTO and 4D draw on Sat 10 Oct 2026, checking for the result"
-    # The run started at 7.30pm, ran 4D right after the window closed, and TOTO was checked 13 times.
-    assert rec.runs[0][0] == sg(2026, 10, 10, 21, 30)
+    # The run started at 7.30pm and ran 4D at once (it does not wait for TOTO); TOTO was checked 13 times.
+    assert rec.runs[0][0] == sg(2026, 10, 10, 19, 30)
     assert sum(1 for g, _ in rec.checks if g == "toto") == 13
     assert sum(1 for g, _ in rec.checks if g == "4d") == 1
     assert rec.checks[0][1] == sg(2026, 10, 10, 19, 30)
@@ -373,9 +373,12 @@ def test_serve_survives_an_exception_in_run_fn():
     rec = Recorder(clock, latest={"4d": published_today})
     rec.fail_runs = 1
     rec.serve(cycles=2)
-    assert [(t.date(), g) for t, g in rec.runs] == [(date(2026, 10, 10), ("4d",)), (date(2026, 10, 11), ("4d",))]
+    # The run that blew up is tried again at the next check, then Sunday runs as usual.
+    assert rec.runs == [(sg(2026, 10, 10, 19, 30), ("4d",)), (sg(2026, 10, 10, 19, 40), ("4d",)),
+                        (sg(2026, 10, 11, 19, 30), ("4d",))]
     errors = rec.events("ERROR")
     assert len(errors) == 1 and "parser blew up" in errors[0]
+    assert rec.notices == []
 
 
 def test_serve_survives_failing_hooks():
@@ -456,5 +459,148 @@ def test_missing_message_for_two_games_is_plural():
     assert rec.runs == []
     assert rec.notices == [
         "TOTO and 4D results for Sat 10 Oct 2026 are still not on the Singapore Pools site after checking "
-        "every 15 minutes for 30 minutes, so they were not posted. The next run will pick them up."
+        "every 15 minutes for 30 minutes, so they were not posted. They will be stored on the next TOTO and 4D "
+        "runs but not posted."
     ]
+
+
+# serve: the run outcome, retries and notices
+
+
+class Done:
+    """done_fn double: answers from a list per call (the last answer repeats)."""
+
+    def __init__(self, *answers):
+        self.answers = list(answers)
+        self.calls: list[tuple[str, date]] = []
+
+    def __call__(self, game, day):
+        self.calls.append((game, day))
+        return self.answers.pop(0) if len(self.answers) > 1 else self.answers[0]
+
+
+def test_serve_runs_again_when_the_first_run_did_not_finish():
+    clock = FakeClock(sg(2026, 10, 5, 10, 0))  # Monday, TOTO
+    rec = Recorder(clock, latest={"toto": published_today})
+    done = Done(False, True)  # the first run could not fetch the result page, the second did
+    serve(rec.run, rec.check, rec.refresh, rec.notify, rec.log, clock.now, clock.sleep, SchedulerConfig(),
+          max_cycles=1, done_fn=done)
+    assert rec.runs == [(sg(2026, 10, 5, 19, 30), ("toto",)), (sg(2026, 10, 5, 19, 40), ("toto",))]
+    assert done.calls == [("toto", date(2026, 10, 5))] * 2
+    assert rec.notices == [] and rec.events("ERROR") == []
+    assert rec.events("WAIT") == ["TOTO result for Mon 5 Oct 2026 is out but was not stored or posted yet, "
+                                  "trying again at 7.40pm"]
+    assert sum(1 for g, _ in rec.checks if g == "toto") == 1  # the site is not asked again once it is out
+
+
+def test_serve_gives_up_with_one_notice_when_runs_never_finish():
+    clock = FakeClock(sg(2026, 10, 5, 10, 0))
+    rec = Recorder(clock, latest={"toto": published_today})
+    serve(rec.run, rec.check, rec.refresh, rec.notify, rec.log, clock.now, clock.sleep, SchedulerConfig(),
+          max_cycles=1, done_fn=Done(False))
+    times = [t for t, _ in rec.runs]
+    assert len(times) == 13 and times[0] == sg(2026, 10, 5, 19, 30) and times[-1] == sg(2026, 10, 5, 21, 30)
+    assert all(b - a == timedelta(minutes=10) for a, b in zip(times, times[1:]))
+    assert rec.notices == [
+        "TOTO result for Mon 5 Oct 2026 is on the Singapore Pools site but could not be fetched or posted after "
+        "checking every 10 minutes for 2 hours. See the activity log."
+    ]
+    assert rec.events("ERROR") == rec.notices
+    assert len(rec.events("WAIT")) == 12  # no "trying again" after the last run
+    assert not any(ch in rec.notices[0] for ch in DASHES)
+
+
+def test_serve_without_done_fn_uses_the_run_result():
+    class Result:
+        def __init__(self, ok):
+            self.ok = ok
+
+    clock = FakeClock(sg(2026, 10, 7, 10, 0))  # Wednesday, 4D
+    rec = Recorder(clock, latest={"4d": published_today})
+    results = iter([Result(False), Result(True)])  # Telegram was down for the first run
+    runs = []
+
+    def run(games):
+        runs.append(clock.now())
+        return next(results)
+
+    serve(run, rec.check, rec.refresh, rec.notify, rec.log, clock.now, clock.sleep, SchedulerConfig(), max_cycles=1)
+    assert runs == [sg(2026, 10, 7, 19, 30), sg(2026, 10, 7, 19, 40)]
+    assert rec.notices == []
+
+
+def test_serve_quiet_run_finishes_at_once():
+    # Posting off (dry run): the cycle is done as soon as the draw is stored.
+    clock = FakeClock(sg(2026, 10, 5, 10, 0))
+    rec = Recorder(clock, latest={"toto": published_today})
+    serve(rec.run, rec.check, rec.refresh, rec.notify, rec.log, clock.now, clock.sleep, SchedulerConfig(),
+          max_cycles=1, done_fn=Done(True))
+    assert rec.runs == [(sg(2026, 10, 5, 19, 30), ("toto",))]
+    assert rec.notices == [] and rec.events("WAIT") == []
+
+
+def test_serve_runs_each_game_as_soon_as_it_is_out():
+    # Sat 10 Oct: 4D is out at 7.30pm, the special TOTO draw only at 8pm.
+    clock = FakeClock(sg(2026, 10, 10, 9, 0))
+    rec = Recorder(clock, latest={"4d": published_today,
+                                  "toto": lambda day: day if clock.now() >= sg(2026, 10, 10, 20, 0) else previous_draw(day)},
+                   state={"next_draws": {"toto": "2026-10-10"}})
+    rec.serve(cycles=1)
+    assert rec.runs == [(sg(2026, 10, 10, 19, 30), ("4d",)), (sg(2026, 10, 10, 20, 0), ("toto",))]
+    assert rec.notices == []
+
+
+def test_serve_waits_for_a_draw_held_later_in_the_evening():
+    # A special TOTO draw at 9.30pm on Friday: checking starts at 10.30pm, not 7.30pm.
+    clock = FakeClock(sg(2026, 10, 9, 10, 0))
+    rec = Recorder(clock, latest={"toto": lambda day: day if clock.now() >= sg(2026, 10, 9, 22, 40) else previous_draw(day)},
+                   state={"next_draws": {"toto": {"draw_datetime": "2026-10-09T21:30:00+08:00"}}})
+    rec.serve(cycles=1)
+    assert rec.checks[0] == ("toto", sg(2026, 10, 9, 22, 30))
+    assert rec.runs == [(sg(2026, 10, 9, 22, 40), ("toto",))]
+    assert rec.notices == []
+    assert "TOTO draw on Fri 9 Oct 2026 is at 9.30pm, checking for its result from 10.30pm" in rec.events("SCHEDULE")
+
+
+def test_serve_keeps_the_run_time_for_a_draw_at_the_usual_time():
+    # RUN_AT 7pm and the next draw page still shows tonight's 6.30pm draw: checking starts at 7pm.
+    clock = FakeClock(sg(2026, 10, 5, 10, 0))
+    rec = Recorder(clock, latest={"toto": published_today},
+                   state={"next_draws": {"toto": {"draw_datetime": "2026-10-05T18:30:00+08:00"}}})
+    rec.serve(cycles=1, config=SchedulerConfig(run_time=time(19, 0)))
+    assert rec.runs == [(sg(2026, 10, 5, 19, 0), ("toto",))]
+
+
+def test_serve_follows_only_the_chosen_games():
+    clock = FakeClock(sg(2026, 10, 10, 9, 0))  # Saturday, a 4D day
+    rec = Recorder(clock, latest={"4d": published_today, "toto": published_today})
+    serve(rec.run, rec.check, rec.refresh, rec.notify, rec.log, clock.now, clock.sleep, SchedulerConfig(),
+          max_cycles=2, games=("toto",))
+    assert rec.runs == [] and rec.checks == []
+    assert rec.events("SCHEDULE")[0].endswith("until results are out. Only TOTO is followed")
+    assert rec.events("SCHEDULE").count("No TOTO draw today") == 2
+
+
+def test_serve_remembers_a_special_draw_after_a_restart(tmp_path):
+    # Thursday's run stored the special TOTO draw on Friday. The container restarts on Friday
+    # morning and by 7.30pm the next draw page already shows Monday's draw.
+    from huatbot import constants
+    from huatbot.runner import refresh_next_draws
+    from huatbot.vault import Vault
+    from tests.htmlgen import FakeFetcher, fourd_next_draw_html, toto_next_draw_html
+
+    vault = Vault(tmp_path / "vault")
+    vault.save_state({"next_draws": {"toto": {"draw_datetime": "2026-10-09T18:30:00+08:00"},
+                                     "checked_at": "2026-10-08T19:45:00+08:00"}})
+    fetcher = FakeFetcher({
+        constants.TOTO_NEXT_DRAW_URL: toto_next_draw_html(sg(2026, 10, 12, 18, 30), 1_000_000),
+        constants.FOURD_NEXT_DRAW_URL: fourd_next_draw_html(sg(2026, 10, 10, 18, 30)),
+    })
+    clock = FakeClock(sg(2026, 10, 9, 10, 0))
+    rec = Recorder(clock, latest={"toto": published_today})
+    rec.refresh = lambda: refresh_next_draws(vault, fetcher, now=clock.now())
+    rec.serve(cycles=1)
+    assert rec.runs == [(sg(2026, 10, 9, 19, 30), ("toto",))]
+    state = vault.load_state()
+    assert state["next_draws"]["toto"]["draw_datetime"].startswith("2026-10-12")
+    assert state["upcoming_draws"]["toto"] == ["2026-10-09", "2026-10-12"]

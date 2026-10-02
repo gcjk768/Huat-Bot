@@ -8,6 +8,8 @@ The notes are linked into one small graph:
 
 * ``Dashboard.md`` links to the newest report, ``Ledger``, ``Tickets``, ``Settings``, this
   month's activity log, the latest draw notes and the suggestion notes of the upcoming draws.
+  Draw and suggestion notes are linked with their folder (``report.note_link``), because the
+  suggestion note made before a draw and that draw's note share a file name.
 * Draw, suggestion and report notes link back to ``[[Dashboard]]``.
 
 Frontmatter uses plain Obsidian properties: ``tags`` (always ``huatbot`` plus the kind of note),
@@ -34,12 +36,14 @@ from .report import (
     clean_text,
     dollars,
     draw_note_name,
+    draw_note_rel,
     draw_type_name,
     field,
     fourd_result_md,
     latest_row,
     link,
     next_draw,
+    note_link,
     odds_line,
     plan_md,
     report_note_name,
@@ -68,7 +72,6 @@ LEDGER = "Ledger"
 TICKETS = "Tickets"
 SETTINGS = "Settings"
 
-DRAW_FOLDERS = {"toto": "Draws/TOTO", "4d": "Draws/4D"}
 SUGGESTION_FOLDER = "Suggestions"
 REPORT_FOLDER = "Reports"
 
@@ -95,11 +98,6 @@ def _stamp(now: datetime) -> str:
     return to_sg(now).isoformat(timespec="seconds")
 
 
-def _name_of(rel: str) -> str:
-    """Wikilink target of a note path: the file name without .md."""
-    return rel.rsplit("/", 1)[-1].removesuffix(".md")
-
-
 def _code(text: Any) -> str:
     """Inline code span for raw user text (may hold dashes, backticks or pipes)."""
     s = " ".join(str(text or "").split())
@@ -121,8 +119,7 @@ def report_note_path(now: datetime) -> str:
 
 
 def draw_note_path(game: str, row: Any) -> str:
-    number = as_int(field(row, "draw_number"))
-    return f"{DRAW_FOLDERS[game]}/{draw_note_name(game, number, as_date(field(row, 'draw_date')))}.md"
+    return draw_note_rel(game, as_int(field(row, "draw_number")), as_date(field(row, "draw_date")))
 
 
 # Draw notes
@@ -196,7 +193,7 @@ def _next_rows(ctx: Context) -> list[list[str]]:
             prize = f"Big 1st Prize {money(first)} per $1"
             kind = "Normal"
         rows.append([GAME_NAMES[game], str(nd.number or "n/a"), nd.when_text, kind, prize,
-                     link(_name_of(path)) if path else "n/a"])
+                     note_link(path) if path else "n/a"])
     return rows
 
 
@@ -218,7 +215,7 @@ def _latest_rows(ctx: Context) -> list[list[str]]:
                                for t, label in (("first", "1st"), ("second", "2nd"), ("third", "3rd")))
             extra = "All 23 numbers in the draw note"
         rows.append([GAME_NAMES[game], str(number), fmt_date(day), result, extra,
-                     link(draw_note_name(game, number, day))])
+                     note_link(draw_note_rel(game, number, day))])
     return rows
 
 
@@ -245,7 +242,7 @@ def dashboard_note(ctx: Context) -> NoteSpec:
     nd_toto, nd_4d = next_draw(ctx, "toto"), next_draw(ctx, "4d")
     totals = ctx.ledger_totals or {}
     report = report_note_name(ctx.now)
-    suggestion_links = [link(_name_of(p)) for p in (suggestion_note_path(nd_toto), suggestion_note_path(nd_4d)) if p]
+    suggestion_links = [note_link(p) for p in (suggestion_note_path(nd_toto), suggestion_note_path(nd_4d)) if p]
     latest_toto, latest_4d = latest_row(ctx.toto), latest_row(ctx.fourd)
 
     frontmatter = {
@@ -485,11 +482,13 @@ def report_note(ctx: Context, report_md: str) -> NoteSpec:
 
 
 def _draw_rows(ctx: Context, game: str) -> list[Any]:
-    """Rows of ``ctx.new_draws[game]``, newest first, capped at settings.draw_notes_backfill."""
-    cap = max(int(getattr(ctx.settings, "draw_notes_backfill", 0) or 0), 0)
+    """Rows of ``ctx.new_draws[game]``, newest first, capped at settings.draw_notes_backfill.
+    The newest new draw always gets its note (even with a cap of 0), because the Dashboard
+    and the report link to the latest draw note."""
+    cap = max(int(getattr(ctx.settings, "draw_notes_backfill", 0) or 0), 1)
     wanted = {int(n) for n in (ctx.new_draws or {}).get(game, []) or []}
     df = ctx.toto if game == "toto" else ctx.fourd
-    if not cap or not wanted or not isinstance(df, pd.DataFrame) or df.empty:
+    if not wanted or not isinstance(df, pd.DataFrame) or df.empty:
         return []
     rows = df[df["draw_number"].astype("int64").isin(wanted)].sort_values("draw_number", ascending=False)
     return [r for _, r in rows.head(cap).iterrows()]
@@ -511,14 +510,15 @@ def write_all(vault, ctx: Context, report_md: str) -> list[str]:
     """Write every note of this run into the vault; return the relative paths actually written.
 
     Draw notes are written for ``ctx.new_draws`` (at most ``settings.draw_notes_backfill`` most
-    recent per game), then the report, the suggestion notes, the ledger and the dashboard. A
-    note whose content is unchanged is not rewritten (``Vault.write_note`` returns False) and
-    not logged. Every write is logged as a NOTE event; a note that cannot be written is logged
-    as an ERROR event and the others are still written.
+    recent per game, and always the newest one), then the report, the suggestion notes, the
+    ledger and the dashboard. A note whose content is unchanged is not rewritten
+    (``Vault.write_note`` returns False) and not logged. Every write is logged as a NOTE event
+    with a link that includes the note's folder; a note that cannot be written is logged as an
+    ERROR event and the others are still written.
     """
     written: list[str] = []
     for rel, frontmatter, body in _all_notes(ctx, report_md):
-        name = link(_name_of(rel))
+        name = note_link(rel)
         try:
             existed = vault.exists(rel)
             changed = vault.write_note(rel, body, frontmatter)
