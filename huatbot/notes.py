@@ -4,17 +4,13 @@ Each builder returns ``(relative path, frontmatter, body)``; ``write_all`` hands
 ``Vault.write_note`` (atomic, skipped when unchanged) and logs every note it actually wrote as
 a NOTE event in this month's activity log.
 
-The notes are linked into one small graph:
+The notes are linked into one small graph: ``Dashboard.md`` links to the newest report,
+``Ledger``, ``Tickets``, ``Settings``, this month's activity log and the latest draw note; draw
+and report notes link back to ``[[Dashboard]]``.
 
-* ``Dashboard.md`` links to the newest report, ``Ledger``, ``Tickets``, ``Settings``, this
-  month's activity log, the latest draw notes and the suggestion notes of the upcoming draws.
-  Draw and suggestion notes are linked with their folder (``report.note_link``), because the
-  suggestion note made before a draw and that draw's note share a file name.
-* Draw, suggestion and report notes link back to ``[[Dashboard]]``.
-
-Frontmatter uses plain Obsidian properties: ``tags`` (always ``huatbot`` plus the kind of note),
-``game``, ``draw``, ``date`` (ISO) and the figures of that note. Bodies follow the house style:
-no dashes in prose (wikilinks with ISO dates and table separator rows are fine).
+Frontmatter uses plain Obsidian properties: ``tags`` (always ``huatbot`` plus the kind of
+note), ``draw``, ``date`` (ISO) and the figures of that note. Bodies follow the house style: no
+dashes in prose (wikilinks with ISO dates and table separator rows are fine).
 """
 from __future__ import annotations
 
@@ -27,47 +23,33 @@ import pandas as pd
 
 from .models import LEDGER_COLUMNS, Context
 from .report import (
-    GAME_NAMES,
-    NextDraw,
-    _held_plan_text,
     activity_note_name,
     as_date,
     as_float,
     as_int,
-    backtest_summary,
     clean_text,
     dollars,
-    draw_note_name,
     draw_note_rel,
     draw_type_name,
     field,
-    fourd_result_md,
+    history_line,
+    jackpot_text,
     latest_row,
     link,
-    picks_not_in_plan,
-    run_winnings,
     next_draw,
     note_link,
-    odds_line,
-    plan_md,
+    outlook_md,
     report_note_name,
     report_warnings,
+    rollover_text,
+    run_winnings,
     sentence,
-    shape_text,
     to_sg,
     toto_result_md,
     toto_signal,
 )
-from .store import fourd_numbers, toto_numbers
-from .textfmt import (
-    fmt_date,
-    fmt_datetime,
-    md_table,
-    money,
-    per_dollar,
-    plural,
-    toto_nums,
-)
+from .store import toto_numbers
+from .textfmt import fmt_date, fmt_datetime, md_table, money, pct, per_dollar, plural, toto_nums
 from .vault import render_note
 
 log = logging.getLogger(__name__)
@@ -76,8 +58,6 @@ DASHBOARD = "Dashboard"
 LEDGER = "Ledger"
 TICKETS = "Tickets"
 SETTINGS = "Settings"
-
-SUGGESTION_FOLDER = "Suggestions"
 REPORT_FOLDER = "Reports"
 
 STATUS_TEXT = {
@@ -108,38 +88,21 @@ def _code(text: Any) -> str:
     s = " ".join(str(text or "").split())
     if not s:
         return ""
-    ticks = "``" if "`" in s else "`"
-    return f"{ticks} {s} {ticks}" if ticks == "``" else f"`{s}`"
-
-
-def suggestion_note_path(nd: NextDraw) -> str | None:
-    """ "Suggestions/2026-10-05 TOTO 4124.md", or None when the next draw number is unknown."""
-    if not nd.number:
-        return None
-    return f"{SUGGESTION_FOLDER}/{draw_note_name(nd.game, nd.number, nd.day)}.md"
+    return f"`` {s} ``" if "`" in s else f"`{s}`"
 
 
 def report_note_path(now: datetime) -> str:
     return f"{REPORT_FOLDER}/{report_note_name(now)}.md"
 
 
-def _open_plan(ctx: Context, game: str):
-    """The plan of ``game``, or None when its next draw was already held (``NextDraw.held``):
-    its sales are closed, so the plan is not for buying any more."""
-    if next_draw(ctx, game).held:
-        return None
-    return ctx.toto_plan if game == "toto" else ctx.fourd_plan
+def draw_note_path(row: Any) -> str:
+    return draw_note_rel(as_int(field(row, "draw_number")), as_date(field(row, "draw_date")))
 
 
-def _held_line(ctx: Context, game: str) -> str:
-    """ "TOTO draw 4124. No suggestions: this draw was held ..." for a held draw."""
-    nd = next_draw(ctx, game)
-    draw = f" draw {nd.number}" if nd.number else ""
-    return f"{GAME_NAMES[game]}{draw}. {_held_plan_text(nd)}"
-
-
-def draw_note_path(game: str, row: Any) -> str:
-    return draw_note_rel(game, as_int(field(row, "draw_number")), as_date(field(row, "draw_date")))
+def _totals_row(totals: dict) -> list[str]:
+    return [str(as_int(totals.get("tickets"))), dollars(totals.get("spent") or 0.0),
+            dollars(totals.get("won") or 0.0), dollars(totals.get("net") or 0.0),
+            str(as_int(totals.get("pending"))), dollars(totals.get("pending_cost") or 0.0)]
 
 
 # Draw notes
@@ -149,138 +112,52 @@ def toto_draw_note(row: Any) -> NoteSpec:
     """("Draws/TOTO/2026-10-01 TOTO 4123.md", frontmatter, body) for one TOTO result row."""
     number = as_int(field(row, "draw_number"))
     day = as_date(field(row, "draw_date"))
-    nums = toto_numbers(row)
-    jackpot = as_float(field(row, "jackpot"))
     frontmatter = {
         "tags": ["huatbot", "toto", "draw"],
-        "game": "TOTO",
         "draw": number,
         "date": _iso(day),
-        "numbers": nums,
+        "numbers": toto_numbers(row),
         "additional": as_int(field(row, "additional")),
         "draw_type": str(field(row, "draw_type", "normal")),
-        "group1_prize": jackpot,
+        "group1_prize": as_float(field(row, "jackpot")),
         "group1_winners": as_int(field(row, "g1_winners")),
     }
     body = "\n\n".join([
         f"# TOTO draw {number}, {fmt_date(day)}",
         f"Back to {link(DASHBOARD)}.",
         toto_result_md(row),
-        f"Shape of this set: {shape_text(nums)}.",
     ])
-    return draw_note_path("toto", row), frontmatter, body
-
-
-def fourd_draw_note(row: Any) -> NoteSpec:
-    """("Draws/4D/2026-09-30 4D 5432.md", frontmatter, body) for one 4D result row."""
-    number = as_int(field(row, "draw_number"))
-    day = as_date(field(row, "draw_date"))
-    nums = fourd_numbers(row)
-    # 4D numbers go in as space separated text: a lone "0698" would be read as the number 698
-    # by YAML 1.2 readers such as Obsidian, while "2751 6755 9745" is text in every reader.
-    frontmatter = {
-        "tags": ["huatbot", "4d", "draw"],
-        "game": "4D",
-        "draw": number,
-        "date": _iso(day),
-        "top_three": " ".join(nums["first"] + nums["second"] + nums["third"]),
-        "starter": " ".join(nums["starter"]),
-        "consolation": " ".join(nums["consolation"]),
-    }
-    body = "\n\n".join([
-        f"# 4D draw {number}, {fmt_date(day)}",
-        f"Back to {link(DASHBOARD)}.",
-        fourd_result_md(row),
-    ])
-    return draw_note_path("4d", row), frontmatter, body
+    return draw_note_path(row), frontmatter, body
 
 
 # Dashboard
 
 
-def _next_rows(ctx: Context) -> list[list[str]]:
-    sig = toto_signal(ctx)
-    rows = []
-    for game in ("toto", "4d"):
-        nd = next_draw(ctx, game)
-        path = suggestion_note_path(nd)
-        if game == "toto":
-            jackpot = sig["jackpot"]
-            prize = f"{money(jackpot)} estimated jackpot" if jackpot is not None else "jackpot not announced yet"
-            if nd.held:
-                prize = "sales closed"
-            kind = draw_type_name(sig["draw_type"])
-        else:
-            first = as_float(ctx.rules.fourd_prizes.get("big", {}).get("first"))
-            prize = f"Big 1st Prize {money(first)} per $1"
-            kind = "Normal"
-        rows.append([GAME_NAMES[game], str(nd.number or "n/a"), nd.when_text, kind, prize,
-                     note_link(path) if path else "n/a"])
-    return rows
-
-
-def _latest_rows(ctx: Context) -> list[list[str]]:
-    rows = []
-    for game in ("toto", "4d"):
-        row = latest_row(ctx.toto if game == "toto" else ctx.fourd)
-        if row is None:
-            continue
-        number, day = as_int(field(row, "draw_number")), as_date(field(row, "draw_date"))
-        if game == "toto":
-            result = f"{toto_nums(toto_numbers(row))}, additional {as_int(field(row, 'additional'))}"
-            winners = as_int(field(row, "g1_winners"))
-            extra = (f"Group 1 {money(as_float(field(row, 'jackpot')))}, "
-                     f"{plural(winners, 'winner') if winners else 'no winner'}")
-        else:
-            nums = fourd_numbers(row)
-            result = ", ".join(f"{label} {(nums[t] or ['n/a'])[0]}"
-                               for t, label in (("first", "1st"), ("second", "2nd"), ("third", "3rd")))
-            extra = "All 23 numbers in the draw note"
-        rows.append([GAME_NAMES[game], str(number), fmt_date(day), result, extra,
-                     note_link(draw_note_rel(game, number, day))])
-    return rows
-
-
-def _plan_rows(ctx: Context) -> list[list[str]]:
-    rows = []
-    for plan in (_open_plan(ctx, "toto"), _open_plan(ctx, "4d")):
-        if plan is None:
-            continue
-        for ln in plan.lines:
-            rows.append([ln.game, clean_text(ln.label), ln.numbers, clean_text(ln.bet_type), dollars(ln.cost)])
-    return rows
-
-
-def _totals_row(totals: dict) -> list[str]:
-    return [str(as_int(totals.get("tickets"))), dollars(totals.get("spent") or 0.0),
-            dollars(totals.get("won") or 0.0), dollars(totals.get("net") or 0.0),
-            str(as_int(totals.get("pending"))), dollars(totals.get("pending_cost") or 0.0)]
-
-
 def dashboard_note(ctx: Context, report_name: str | None = None) -> NoteSpec:
-    """("Dashboard.md", frontmatter, body): next draws, buy signal, latest results, plan, ledger
-    totals and links to the newest report (``report_name``, default this run's), ledger,
-    tickets, settings, log and suggestion notes."""
+    """("Dashboard.md", frontmatter, body): next draw, buy signal, the next big prize, the latest
+    result, ledger totals and links to the newest report (``report_name``, default this run's)."""
     sig = toto_signal(ctx)
-    nd_toto, nd_4d = next_draw(ctx, "toto"), next_draw(ctx, "4d")
+    nd = next_draw(ctx)
+    out = ctx.outlook
+    first = out.steps[0] if out is not None and out.steps else None
+    biggest = out.biggest if out is not None else None
     totals = ctx.ledger_totals or {}
     report = report_name or report_note_name(ctx.now)
-    suggestion_links = [note_link(p) for p in (suggestion_note_path(nd_toto), suggestion_note_path(nd_4d)) if p]
-    latest_toto, latest_4d = latest_row(ctx.toto), latest_row(ctx.fourd)
+    latest = latest_row(ctx.toto)
 
     frontmatter = {
         "tags": ["huatbot", "dashboard"],
         "updated": _stamp(ctx.now),
-        "next_toto_draw": nd_toto.number,
-        "next_toto_date": nd_toto.day.isoformat() if nd_toto.day else None,
-        "next_toto_jackpot": sig["jackpot"],
-        "next_toto_draw_type": sig["draw_type"],
+        "next_draw": nd.number,
+        "next_date": nd.day.isoformat() if nd.day else None,
+        "next_jackpot": sig["jackpot"],
+        "next_draw_type": sig["draw_type"],
+        "chance_jackpot_won": round(first.chance_won, 4) if first else None,
+        "next_big_prize": round(biggest.jackpot) if biggest else None,
+        "next_big_prize_date": biggest.draw_date.isoformat() if biggest and biggest.draw_date else None,
         "buy_signal": sig["label"],
         "return_per_dollar": round(sig["ev"], 4) if sig["ev"] is not None else None,
-        "next_4d_draw": nd_4d.number,
-        "next_4d_date": nd_4d.day.isoformat() if nd_4d.day else None,
-        "latest_toto_draw": as_int(field(latest_toto, "draw_number")) if latest_toto is not None else None,
-        "latest_4d_draw": as_int(field(latest_4d, "draw_number")) if latest_4d is not None else None,
+        "latest_draw": as_int(field(latest, "draw_number")) if latest is not None else None,
         "spent": float(totals.get("spent") or 0.0),
         "won": float(totals.get("won") or 0.0),
         "net": float(totals.get("net") or 0.0),
@@ -291,42 +168,45 @@ def dashboard_note(ctx: Context, report_name: str | None = None) -> NoteSpec:
         f"Updated {fmt_datetime(to_sg(ctx.now))}. Newest report: {link(report)}. "
         f"Activity log: {link(activity_note_name(ctx.now))}.",
         f"Your notes: {link(TICKETS)} (add tickets here), {link(LEDGER)} (every ticket and the totals), "
-        f"{link(SETTINGS)} (budgets and alerts).",
+        f"{link(SETTINGS)} (jackpot alert).",
+        "## Next draw",
     ]
-    if suggestion_links:
-        parts.append(f"Suggestions for the upcoming draws: {', '.join(suggestion_links)}.")
-
-    parts += ["## Next draws",
-              md_table(["Game", "Draw", "Date and time", "Draw type", "Prize", "Suggestions"], _next_rows(ctx))]
+    jackpot = jackpot_text(sig, "not announced yet")
+    rows = [
+        ["Draw", str(nd.number or "n/a")],
+        ["Date and time", nd.when_text],
+        ["Estimated jackpot", "sales closed" if nd.held else jackpot],
+        ["Draw type", draw_type_name(sig["draw_type"])],
+        ["Jackpot rollovers so far", rollover_text(sig)],
+        ["Chance somebody wins Group 1", pct(first.chance_won, 0) if first else "n/a"],
+    ]
+    parts.append(md_table(["Item", "Value"], rows, align="ll"))
 
     parts.append("## Buy signal")
-    if nd_toto.held:
+    if nd.held:
         parts.append("No buy signal: this draw was held and its sales are closed.")
     elif sig["label"]:
         ev = f" Return per $1: about {per_dollar(sig['ev'])}." if sig["ev"] is not None else ""
         parts.append(f"**{sig['label']}**. {sentence(sig['reason'])}{ev}".rstrip())
     else:
         parts.append("Not worked out in this run.")
-    parts.append(f"Draws in a row with no Group 1 winner: {sig['streak']}.")
 
-    parts.append("## Latest results")
-    latest = _latest_rows(ctx)
-    parts.append(md_table(["Game", "Draw", "Date", "Winning numbers", "Prizes", "Note"], latest)
-                 if latest else "No results are stored yet.")
+    parts.append("## The next big prize")
+    parts.append(outlook_md(out))
 
-    parts.append("## Suggested purchases")
-    plan_rows = _plan_rows(ctx)
-    plans = [p for p in (_open_plan(ctx, "toto"), _open_plan(ctx, "4d")) if p is not None]
-    held = [_held_line(ctx, g) for g in ("toto", "4d") if next_draw(ctx, g).held]
-    if plan_rows:
-        parts.append(md_table(["Game", "Strategy", "Numbers", "Bet type", "Cost"], plan_rows, align="llllr"))
-        budget = sum(p.budget for p in plans)
-        total = sum(p.total for p in plans)
-        parts.append(f"Total {dollars(total)} of the {dollars(budget)} budget. Reasons and options are in the "
-                     "suggestion notes.")
-    elif not held:
-        parts.append("Nothing to buy in this run.")
-    parts += held
+    parts.append("## Latest result")
+    if latest is None:
+        parts.append("No results are stored yet.")
+    else:
+        number, day = as_int(field(latest, "draw_number")), as_date(field(latest, "draw_date"))
+        winners = as_int(field(latest, "g1_winners"))
+        prize = (f"Group 1 {money(as_float(field(latest, 'jackpot')))}, "
+                 f"{plural(winners, 'winner') if winners else 'no winner'}")
+        parts.append(f"Draw {number}, {fmt_date(day)}: **{toto_nums(toto_numbers(latest))}**, additional "
+                     f"{as_int(field(latest, 'additional'))}. {prize}. {note_link(draw_note_rel(number, day))}")
+    hist = history_line(ctx.history)
+    if hist:
+        parts.append(hist)
 
     parts.append("## My tickets")
     parts.append(md_table(["Tickets", "Spent", "Won", "Net", "Waiting", "Waiting cost"], [_totals_row(totals)],
@@ -347,81 +227,6 @@ def dashboard_note(ctx: Context, report_name: str | None = None) -> NoteSpec:
     return "Dashboard.md", frontmatter, "\n\n".join(parts)
 
 
-# Suggestions
-
-
-def _suggestion_note(ctx: Context, game: str, report_name: str | None = None) -> NoteSpec | None:
-    nd = next_draw(ctx, game)
-    path = suggestion_note_path(nd)
-    if path is None or nd.held:
-        # A held draw keeps the note written before it, with the plan and signal of that time.
-        return None
-    label = GAME_NAMES[game]
-    plan = ctx.toto_plan if game == "toto" else ctx.fourd_plan
-    picks = ctx.toto_picks if game == "toto" else ctx.fourd_picks
-    backtest = ctx.toto_backtest if game == "toto" else ctx.fourd_backtest
-
-    frontmatter: dict[str, Any] = {
-        "tags": ["huatbot", "suggestion", game],
-        "game": label,
-        "draw": nd.number,
-        "date": nd.day.isoformat() if nd.day else None,
-        "budget": plan.budget if plan is not None else None,
-        "total_cost": plan.total if plan is not None else None,
-    }
-    # The properties list what the plan buys (the What to buy table), System 7 line included.
-    lines = plan.lines if plan is not None else []
-    if game == "toto":
-        frontmatter["sets"] = [ln.numbers for ln in lines]
-        frontmatter["buy_signal"] = toto_signal(ctx)["label"]
-    else:
-        frontmatter["numbers"] = " ".join(ln.numbers for ln in lines)  # text, see fourd_draw_note
-    frontmatter["generated"] = _stamp(ctx.now)
-
-    parts = [
-        f"# {label} suggestions for draw {nd.number}",
-        f"{nd.when_text}. Back to {link(DASHBOARD)}. Full analysis: {link(report_name or report_note_name(ctx.now))}.",
-        "## What to buy",
-        plan_md(plan, game),
-    ]
-    others = picks_not_in_plan(plan, picks, game)
-    if others:
-        parts.append("## Other suggestions")
-        if game == "toto":
-            rows = [[clean_text(p.name), toto_nums(p.numbers), clean_text(p.reason)] for p in others]
-            parts.append(md_table(["Strategy", "Numbers", "Reason"], rows))
-        else:
-            rows = [[clean_text(p.name), p.number, clean_text(p.bet_type), clean_text(p.reason)] for p in others]
-            parts.append(md_table(["Pick", "Number", "Bet type", "Reason"], rows))
-    if game == "toto":
-        sig = toto_signal(ctx)
-        parts.append("## Buy signal")
-        jackpot = money(sig["jackpot"]) if sig["jackpot"] is not None else "not announced yet"
-        parts.append(f"**{sig['label'] or 'n/a'}**. Estimated jackpot {jackpot}, "
-                     f"{draw_type_name(sig['draw_type']).lower()} draw. {sentence(sig['reason'])}".rstrip())
-    summary = backtest_summary(backtest, game)
-    if summary:
-        parts.append("## Backtest")
-        parts.append(clean_text(summary))
-    parts.append(f"Bought any of these? Add them to {link(TICKETS)} so the bot can check them. {odds_line()}")
-    return path, frontmatter, "\n\n".join(parts)
-
-
-def suggestions_notes(ctx: Context, report_name: str | None = None) -> list[NoteSpec]:
-    """Suggestion notes for the upcoming TOTO and 4D draws (games without data, and a draw
-    already held, are skipped). They link to the report ``report_name`` (default this run's)."""
-    notes = []
-    for game in ("toto", "4d"):
-        try:
-            note = _suggestion_note(ctx, game, report_name)
-        except Exception as exc:  # one broken note must not stop the others
-            log.warning("Could not build the %s suggestion note: %s", GAME_NAMES[game], exc)
-            continue
-        if note is not None:
-            notes.append(note)
-    return notes
-
-
 # Ledger
 
 
@@ -434,7 +239,7 @@ def _ledger_rows(ledger: pd.DataFrame) -> list[list[str]]:
         status = str(r.get("status") or "pending")
         draw = r.get("draw_number")
         rows.append([
-            clean_text(r.get("game")), fmt_date(r.get("draw_date") or None),
+            fmt_date(r.get("draw_date") or None),
             "" if draw is None or pd.isna(draw) else str(int(draw)),
             clean_text(r.get("numbers")), clean_text(r.get("bet_type")), dollars(r.get("cost")),
             STATUS_TEXT.get(status, status), clean_text(r.get("result")),
@@ -467,8 +272,8 @@ def ledger_note(ctx: Context) -> NoteSpec:
         "## Tickets",
     ]
     if len(ledger):
-        parts.append(md_table(["Game", "Draw date", "Draw", "Numbers", "Bet type", "Cost", "Status", "Result",
-                               "Won"], _ledger_rows(ledger), align="lllllrllr"))
+        parts.append(md_table(["Draw date", "Draw", "Numbers", "Bet type", "Cost", "Status", "Result", "Won"],
+                              _ledger_rows(ledger), align="llllrllr"))
     else:
         parts.append(f"No tickets yet. Add the tickets you buy to {link(TICKETS)}.")
     bad = list(ctx.bad_ticket_lines or [])
@@ -488,16 +293,18 @@ def ledger_note(ctx: Context) -> NoteSpec:
 def report_note(ctx: Context, report_md: str) -> NoteSpec:
     """("Reports/2026-10-02 1930 Report.md", frontmatter, body) holding the full report."""
     sig = toto_signal(ctx)
-    toto_row, fourd_row = latest_row(ctx.toto), latest_row(ctx.fourd)
+    row = latest_row(ctx.toto)
+    out = ctx.outlook
+    biggest = out.biggest if out is not None else None
     frontmatter = {
         "tags": ["huatbot", "report"],
         "date": to_sg(ctx.now).date().isoformat(),
         "created": _stamp(ctx.now),
-        "games": [GAME_NAMES[g] for g in ctx.games_drawn if g in GAME_NAMES],
-        "toto_draw": as_int(field(toto_row, "draw_number")) if toto_row is not None else None,
-        "fourd_draw": as_int(field(fourd_row, "draw_number")) if fourd_row is not None else None,
+        "new_draws": len(ctx.new_draws or []),
+        "latest_draw": as_int(field(row, "draw_number")) if row is not None else None,
         "buy_signal": sig["label"],
-        "next_toto_jackpot": sig["jackpot"],
+        "next_jackpot": sig["jackpot"],
+        "next_big_prize": round(biggest.jackpot) if biggest else None,
     }
     links = f"Back to {link(DASHBOARD)}. Activity log: {link(activity_note_name(ctx.now))}."
     text = (report_md or "").strip("\n")
@@ -511,16 +318,13 @@ def report_note(ctx: Context, report_md: str) -> NoteSpec:
 
 # Writing
 
-# Frontmatter lines that only stamp the time of the run, and the link to the run's report in a
-# suggestion note: a note whose only change is in these is not rewritten (or logged as updated).
+# Frontmatter lines that only stamp the time of the run: a note whose only change is in these
+# is not rewritten (or logged as updated).
 _STAMP_LINE = re.compile(r"^(?:updated|generated): .*(?:\n|$)", re.M)
-_REPORT_LINK = re.compile(r"\[\[\d{4}-\d{2}-\d{2} \d{4} Report\]\]")
 
 
-def _without_stamps(rel: str, text: str) -> str:
+def _without_stamps(text: str) -> str:
     head, sep, body = text.partition("\n---\n") if text.startswith("---\n") else ("", "", text)
-    if rel.startswith(f"{SUGGESTION_FOLDER}/"):
-        body = _REPORT_LINK.sub("[[report]]", body)
     return _STAMP_LINE.sub("", head) + sep + body
 
 
@@ -529,22 +333,21 @@ def _only_stamps_changed(vault, rel: str, body: str, frontmatter: dict) -> bool:
     old = vault.read_text(rel)
     if old is None:
         return False
-    return _without_stamps(rel, old) == _without_stamps(rel, render_note(body, frontmatter))
+    return _without_stamps(old) == _without_stamps(render_note(body, frontmatter))
 
 
-def _draw_rows(ctx: Context, game: str, vault=None) -> list[Any]:
-    """Rows of ``ctx.new_draws[game]``, newest first, capped at settings.draw_notes_backfill.
-    The newest new draw always gets its note (even with a cap of 0), because the Dashboard
-    and the report link to the latest draw note. With ``vault``, the newest stored draw is
-    also included when its note is missing (a run stopped after saving the draw but before
-    writing its note), so that link never points at a missing note."""
+def _draw_rows(ctx: Context, vault=None) -> list[Any]:
+    """Rows of ``ctx.new_draws``, newest first, capped at settings.draw_notes_backfill. The
+    newest new draw always gets its note (even with a cap of 0), because the Dashboard and the
+    report link to it. With ``vault``, the newest stored draw is also included when its note is
+    missing (a run stopped after saving the draw but before writing its note)."""
     cap = max(int(getattr(ctx.settings, "draw_notes_backfill", 0) or 0), 1)
-    wanted = {int(n) for n in (ctx.new_draws or {}).get(game, []) or []}
-    df = ctx.toto if game == "toto" else ctx.fourd
+    wanted = {int(n) for n in ctx.new_draws or []}
+    df = ctx.toto
     if not isinstance(df, pd.DataFrame) or df.empty:
         return []
     newest = latest_row(df)
-    if vault is not None and newest is not None and not vault.exists(draw_note_path(game, newest)):
+    if vault is not None and newest is not None and not vault.exists(draw_note_path(newest)):
         wanted.add(as_int(field(newest, "draw_number")))
     if not wanted:
         return []
@@ -564,8 +367,8 @@ def _report_without_stamps(text: str) -> str:
 
 def _earlier_report(vault, ctx: Context, spec: NoteSpec) -> str | None:
     """The newest report note of the same day, when it differs from this run's report only in
-    its time stamps (the time in its title and ``created``), or None. A rerun that only retries
-    the post, for example while Telegram is down, then adds no near identical report."""
+    its time stamps, or None. A rerun that only retries the post (Telegram was down) then adds
+    no near identical report."""
     rel, frontmatter, body = spec
     try:
         folder = vault.path(REPORT_FOLDER)
@@ -590,16 +393,13 @@ def report_rel(vault, ctx: Context, report_md: str) -> str:
 
 
 def _all_notes(ctx: Context, report_md: str, vault=None) -> list[NoteSpec]:
-    notes: list[NoteSpec] = []
-    for game, build in (("toto", toto_draw_note), ("4d", fourd_draw_note)):
-        # Oldest first, so the activity log reads in draw order.
-        notes += [build(r) for r in reversed(_draw_rows(ctx, game, vault))]
+    # Draw notes oldest first, so the activity log reads in draw order.
+    notes: list[NoteSpec] = [toto_draw_note(r) for r in reversed(_draw_rows(ctx, vault))]
     report = report_note(ctx, report_md)
     earlier = _earlier_report(vault, ctx, report) if vault is not None else None
     report_name = (earlier or report[0]).rsplit("/", 1)[-1].removesuffix(".md")
     if earlier is None:
         notes.append(report)
-    notes += suggestions_notes(ctx, report_name)
     notes.append(ledger_note(ctx))
     notes.append(dashboard_note(ctx, report_name))
     return notes
@@ -609,14 +409,12 @@ def write_all(vault, ctx: Context, report_md: str) -> list[str]:
     """Write every note of this run into the vault; return the relative paths actually written.
 
     Draw notes are written for ``ctx.new_draws`` (at most ``settings.draw_notes_backfill`` most
-    recent per game, and always the newest one) and for the newest stored draw when its note is
-    missing, then the report, the suggestion notes, the ledger and the dashboard. A note whose
-    content is unchanged, apart from the run time stamps in its properties (and the report link
-    of a suggestion note), is not rewritten and not logged. No new report is written when the
-    newest report of the same day differs only in its time stamps: the other notes link to that
-    one (``report_rel`` gives its path). Every write is logged as a NOTE event
-    with a link that includes the note's folder; a note that cannot be written is logged as an
-    ERROR event and the others are still written.
+    recent, and always the newest one) and for the newest stored draw when its note is missing,
+    then the report, the ledger and the dashboard. A note whose content is unchanged apart from
+    the run time stamps in its properties is not rewritten and not logged. No new report is
+    written when the newest report of the same day differs only in its time stamps. Every
+    write is logged as a NOTE event; a note that cannot be written is logged as an ERROR event
+    and the others are still written.
     """
     written: list[str] = []
     for rel, frontmatter, body in _all_notes(ctx, report_md, vault):

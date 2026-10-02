@@ -29,7 +29,7 @@ That keeps the light SVG, the dark SVG and the draw.io source in step.
 
 ## Logos
 
-Docker, Telegram, Obsidian, Python, pandas, NumPy, SciPy and Claude logos come from Simple Icons
+Docker, Telegram, Obsidian, Python, pandas, NumPy and Claude logos come from Simple Icons
 16.33.0, which collects each brand's official mark. The SVG data is CC0 (see
 `icons/SIMPLE_ICONS_LICENSE.md`). The trademarks still belong to their owners and are used here only
 to name the tools the bot works with.

@@ -5,12 +5,12 @@ Layout inside the vault (``root``), everything under one bot folder (``base``)::
     <root>/
       .obsidian/                 never touched
       Huat Bot/                  base (VAULT_FOLDER)
-        Settings.md              read: budgets and options as note properties
+        Settings.md              read: the jackpot alert and options as note properties
         Tickets.md               read: the user's tickets
         Dashboard.md, Ledger.md  written every run
-        Data/                    toto.csv, fourd.csv, ledger.csv, state.json, caches
-        Draws/TOTO, Draws/4D     one note per draw
-        Reports/, Suggestions/   one note per run / upcoming draw
+        Data/                    toto.csv, ledger.csv, state.json, prize_rules.json
+        Draws/TOTO               one note per draw
+        Reports/                 one note per run
         Logs/YYYY-MM Activity.md every fetch, note, post and error
 
 Obsidian (or Obsidian Sync, Syncthing, SMB clients) may be watching the same folder
@@ -54,7 +54,7 @@ DATA_FOLDER = "Data"
 LOG_FOLDER = "Logs"
 # Folders created inside the bot folder by ensure_layout (Data is created separately because
 # DATA_DIR may point somewhere else).
-LAYOUT_FOLDERS = ("Draws/TOTO", "Draws/4D", "Reports", "Suggestions", LOG_FOLDER)
+LAYOUT_FOLDERS = ("Draws/TOTO", "Reports", LOG_FOLDER)
 
 # state.json keys that must hold an object with one entry per game.
 _STATE_OBJECT_KEYS = ("next_draws", "last_posted", "skip", "fetch_failures", "upcoming_draws")
@@ -142,8 +142,7 @@ def _represent_list(dumper: yaml.SafeDumper, data: list) -> yaml.Node:
 
 _FrontmatterDumper.add_representer(list, _represent_list)
 
-# Strings that a YAML 1.2 reader (Obsidian) would turn into a number, such as the 4D number
-# "0042" or "1e3". PyYAML follows YAML 1.1 and leaves "0042" unquoted because 1.1 reads it as
+# Strings that a YAML 1.2 reader (Obsidian) would turn into a number, such as "0042" or "1e3". PyYAML follows YAML 1.1 and leaves "0042" unquoted because 1.1 reads it as
 # octal only with digits 0 to 7, so force quotes for anything number shaped.
 _NUMBER_LIKE = re.compile(r"^[+-]?(\d[\d_]*(\.\d*)?|\.\d+)([eE][+-]?\d+)?$|^0[xXoObB][0-9a-fA-F_]+$")
 
@@ -336,10 +335,6 @@ class Vault:
         return self.data_dir / "toto.csv"
 
     @property
-    def fourd_csv(self) -> Path:
-        return self.data_dir / "fourd.csv"
-
-    @property
     def ledger_csv(self) -> Path:
         return self.data_dir / "ledger.csv"
 
@@ -350,10 +345,6 @@ class Vault:
     @property
     def prize_rules_path(self) -> Path:
         return self.data_dir / "prize_rules.json"
-
-    @property
-    def backtest_cache_path(self) -> Path:
-        return self.data_dir / "backtest_cache.json"
 
     def path(self, *parts: str | Path) -> Path:
         """Absolute path of a file inside the bot folder.
@@ -547,7 +538,7 @@ class Vault:
                     del data[key][game]
         for problem in problems:
             log.warning("state.json: %s, so it was ignored", problem)
-            hint = ' (it should look like "skip": {"toto": [4000], "4d": []})' if problem.startswith("skip") else ""
+            hint = ' (it should look like "skip": {"toto": [4000]})' if problem.startswith("skip") else ""
             self.log("ERROR", f"{self.state_path.name}: {problem}, so it was ignored{hint}")
         return data
 

@@ -1,8 +1,9 @@
 # Huat Bot product spec
 
-This is the analyst prompt the bot implements, kept here so the code can be checked against it.
-The bot computes everything in Python. The prompt is the requirement, not something the bot sends
-to a model.
+This is the analyst prompt the bot was first built from, kept here so the code can be checked
+against it, followed by the changes asked for since. The latest change (TOTO only, no number
+suggestions, at the end) overrides the original prompt where they differ. The bot computes
+everything in Python. The prompt is the requirement, not something the bot sends to a model.
 
 ## Analyst prompt
 
@@ -116,3 +117,35 @@ The bot treats an Obsidian vault on the NAS as its single home for everything it
   suggestion notes per upcoming draw, a full report per run, `Dashboard.md`, `Ledger.md`, and an
   activity log (`Logs/YYYY-MM Activity.md`) with a row for every fetch, new draw, ticket check,
   note written, message posted and error.
+
+## Change: TOTO only, no number suggestions
+
+> remove possible winning number. remove 4D too, i want to know about Toto will do and the next big
+> prize. improve the code
+
+What this changes in the prompt above:
+
+* **Removed:** everything about 4D (data, analysis, picks, tickets, next draw, schedule days),
+  STEP 2 items 1 to 6 (frequency, overdue numbers, pairs, winning set shape, chi square, crowd
+  scores), STEP 4 (backtest) and STEP 5 (suggested numbers, System 7 offer), and the budgets. Every
+  draw is independent, so the bot never suggests numbers to pick.
+* **Kept:** fetching the TOTO history, the official prize rules, the latest result with its winning
+  shares table, the next draw with its jackpot and draw type, the buy signal (return per $1 at the
+  jackpot, including the chance of sharing Group 1 at typical sales), the ticket check and ledger,
+  the honest odds note, the vault, the schedule (Monday and Thursday plus special draws), the
+  retries, dry run mode and no dashes in the write up.
+* **Added: what TOTO will do.** A draw by draw projection from the next draw to the cascade draw:
+  the jackpot if nobody wins it first (38% of 54% of the boards sold added at each rollover), the
+  boards each draw is likely to sell (worked out from the Group 3 or Group 4 winning shares of past
+  draws with a similar jackpot), the chance somebody wins Group 1 at that draw and the chance it is
+  still unwon by then.
+* **Added: the next big prize.** The biggest jackpot on that path, when it comes and how likely it is
+  to get that far, plus any announced Hongbao or special draw.
+* **Added: jackpot history.** How often Group 1 is won, how long a jackpot lasts, how many cascaded,
+  the typical prize when won, the last win and the biggest jackpots.
+* **Telegram:** two messages. Message 1: the latest result and the ticket check. Message 2: the next
+  draw, its jackpot, the buy signal and the next big prize.
+* **Report order:** 1) Next draw and the next big prize 2) Latest result and my ticket check
+  3) Jackpot history 4) Odds note.
+* **Settings.md:** jackpot alert, special draw alert, first draw kept, draw notes backfill. Old
+  settings are listed once as no longer used.

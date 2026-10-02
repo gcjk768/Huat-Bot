@@ -2,8 +2,8 @@
 
 The expected value model treats the number of other boards that hit each group as Poisson
 with mean boards x (group combinations) / 13,983,816, which gives closed forms for sharing a
-pool prize. Sales ("boards") at a given jackpot are estimated from history via the crowd
-table's pool estimates. No label ever means a draw is more likely to be won by you: the
+pool prize. Sales ("boards") at a given jackpot are estimated from history via the
+sales table. No label ever means a draw is more likely to be won by you: the
 label only reflects the jackpot size and the user's alert settings.
 """
 from __future__ import annotations
@@ -15,9 +15,10 @@ import numpy as np
 import pandas as pd
 
 from . import constants as C
-from .analysis_toto import CASCADE_TYPES, crowd_table
 from .models import BuySignal, NextToto, PrizeRules, Settings
+from .sales import CASCADE_TYPES, sales_table
 from .store import no_winner_streak
+from .textfmt import money, per_dollar
 
 log = logging.getLogger(__name__)
 
@@ -26,15 +27,6 @@ MIN_NEAR_DRAWS = 8
 MIN_FIT_DRAWS = 20
 SPECIAL_TYPES = ("cascade", "hongbao", "special")
 _TYPE_NAMES = {"cascade": "cascade", "hongbao": "Hongbao", "special": "special", "normal": "normal"}
-
-
-def _money(x: float) -> str:
-    """Whole dollars with thousands separators, e.g. "$1,000,000" (local, no dashes)."""
-    return f"${x:,.0f}" if x >= 0 else f"minus ${-x:,.0f}"
-
-
-def _per_dollar(x: float) -> str:
-    return f"${x:,.2f}" if x >= 0 else f"minus ${-x:,.2f}"
 
 
 # Sales estimate
@@ -48,13 +40,13 @@ def estimate_boards(
     1. At least 8 past draws with a jackpot within x1.25 of it: the median of their boards.
     2. Else a straight line fit of log(boards) on log(jackpot) over all usable draws (at least 20).
     3. Else (None, "not enough history").
-    Usable draws are those with a clean pool estimate in the crowd table and a known jackpot.
+    Usable draws are those with a sales figure (sales.sales_table) and a known jackpot.
     """
     jackpot = _clean_amount(jackpot)
     if jackpot is None or jackpot <= 0:
         return None, "no jackpot to compare with"
     if table is None:
-        table = crowd_table(df, rules)
+        table = sales_table(df, rules)
     jp = pd.Series(df["jackpot"].to_numpy(dtype=float), index=df["draw_number"].to_numpy())
     boards = table["boards"].astype(float).reindex(jp.index)
     ok = (np.isfinite(boards) & (boards > 0) & np.isfinite(jp) & (jp > 0)).to_numpy()
@@ -65,7 +57,7 @@ def estimate_boards(
     n_near = int(near.sum())
     if n_near >= MIN_NEAR_DRAWS:
         est = float(np.median(b[near]))
-        return est, f"median of {n_near} past draws with a jackpot near {_money(jackpot)}"
+        return est, f"median of {n_near} past draws with a jackpot near {money(jackpot)}"
 
     if len(b) >= MIN_FIT_DRAWS and np.ptp(np.log(j)) > 0:
         slope, intercept = np.polyfit(np.log(j), np.log(b), 1)
@@ -75,7 +67,7 @@ def estimate_boards(
         else:
             why = f"only {n_near} past draw{'s' if n_near > 1 else ''} had"
         return est, (f"trend of sales against jackpot over {len(b)} past draws, as {why} "
-                     f"a jackpot near {_money(jackpot)}")
+                     f"a jackpot near {money(jackpot)}")
     return None, "not enough history"
 
 
@@ -160,7 +152,7 @@ def buy_signal(
     boards, method, ev = None, "jackpot estimate not available", {}
     if jackpot is not None:
         if table is None and len(df):
-            table = crowd_table(df, rules)
+            table = sales_table(df, rules)
         boards, method = estimate_boards(df, jackpot, rules, table) if len(df) else (None, "not enough history")
         if boards is not None:
             ev = toto_ev_per_dollar(jackpot, boards, rules, draw_type)
@@ -171,7 +163,7 @@ def buy_signal(
     if total is None:
         ev_part = ", but there is not enough history to estimate the return per $1"
     else:
-        ev_part = f", and each $1 returns about {_per_dollar(total)} on average"
+        ev_part = f", and each $1 returns about {per_dollar(total)} on average"
         if total >= 1:
             # An average above $1 comes from a prize almost nobody wins: say so in the same
             # sentence, so the figure never reads as advice to buy more.
@@ -179,12 +171,12 @@ def buy_signal(
             boards_text = "board" if top == 1 else "boards"
             ev_part += (f", but most of that average comes from the jackpot, which only {top} {boards_text} "
                         f"in {C.TOTO_COMBOS:,} can win, so almost every ticket still loses and it is no "
-                        "reason to spend above your budget")
+                        "reason to spend more than you planned")
 
     if jackpot is not None and jackpot >= settings.jackpot_alert:
         label = "HIGH"
-        reason = (f"The estimated jackpot of {_money(jackpot)} meets your "
-                  f"{_money(settings.jackpot_alert)} alert{ev_part}.")
+        reason = (f"The estimated jackpot of {money(jackpot)} meets your "
+                  f"{money(settings.jackpot_alert)} alert{ev_part}.")
     elif special:
         label = "HIGH"
         tail = ev_part if jackpot is not None else " (jackpot estimate not available)"
@@ -194,11 +186,11 @@ def buy_signal(
         reason = "Signal set to MEDIUM by default (jackpot estimate not available)."
     elif jackpot <= rules.min_group1 * 1.001:
         label = "LOW"
-        reason = f"The jackpot is at the {_money(rules.min_group1)} minimum{ev_part}."
+        reason = f"The jackpot is at the {money(rules.min_group1)} minimum{ev_part}."
     else:
         label = "MEDIUM"
-        reason = (f"The estimated jackpot of {_money(jackpot)} is above the minimum but below your "
-                  f"{_money(settings.jackpot_alert)} alert{ev_part}.")
+        reason = (f"The estimated jackpot of {money(jackpot)} is above the minimum but below your "
+                  f"{money(settings.jackpot_alert)} alert{ev_part}.")
 
     log.debug("buy signal %s: jackpot=%s type=%s boards=%s ev=%s", label, jackpot, draw_type, boards, total)
     return BuySignal(

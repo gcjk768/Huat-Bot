@@ -37,12 +37,6 @@ class FieldSpec:
 
 # Every user facing Settings field, in the order they appear in Settings.md.
 FIELD_SPECS: dict[str, FieldSpec] = {
-    "toto_budget": FieldSpec(
-        "money", 0, 100_000,
-        "The most to spend on TOTO for each draw. The suggested sets never cost more than this."),
-    "fourd_budget": FieldSpec(
-        "money", 0, 100_000,
-        "The most to spend on 4D for each draw. The suggested numbers never cost more than this."),
     "jackpot_alert": FieldSpec(
         "money", 0, None,
         "A TOTO jackpot estimate at or above this amount makes the buy signal HIGH."),
@@ -52,19 +46,9 @@ FIELD_SPECS: dict[str, FieldSpec] = {
         "int", C.TOTO_FIRST_CURRENT_FORMAT_DRAW, 99_999,
         "The first TOTO draw number kept in the history. The lowest allowed is the first draw of "
         "the current 6 from 49 format.", commas=False),
-    "fourd_history_draws": FieldSpec(
-        "int", 10, 10_000, "How many of the latest 4D draws to keep and analyse."),
-    "backtest_draws": FieldSpec(
-        "int", 10, 2_000, "How many recent draws each backtest replays."),
-    "random_sets_per_draw": FieldSpec(
-        "int", 10, 20_000,
-        "How many random sets (TOTO) or random numbers (4D) each backtest compares against for every draw. "
-        "More is steadier but slower."),
-    "offer_system7": FieldSpec(
-        "bool", help="When true, the TOTO suggestions include a System 7 option whenever the budget allows."),
     "draw_notes_backfill": FieldSpec(
         "int", 0, 5_000,
-        "How many recent draws of each game get their own note the first time the bot fills this vault."),
+        "How many recent draws get their own note the first time the bot fills this vault."),
 }
 
 # Properties Obsidian and its plugins commonly add. They are allowed and silently ignored.
@@ -72,14 +56,16 @@ OBSIDIAN_KEYS = frozenset({"tags", "tag", "aliases", "alias", "cssclasses", "css
 
 # Friendly spellings people are likely to type, mapped to the real field name.
 KEY_ALIASES = {
-    "4d_budget": "fourd_budget",
-    "4d_history_draws": "fourd_history_draws",
-    "budget_toto": "toto_budget",
-    "budget_4d": "fourd_budget",
-    "system7": "offer_system7",
-    "offer_system_7": "offer_system7",
     "alert_on_special_draw": "alert_on_special_draws",
 }
+
+# Settings of earlier versions (number suggestions, backtests and 4D are gone). They are
+# ignored with one gentle note instead of an "unknown setting" warning each.
+RETIRED_KEYS = frozenset({
+    "toto_budget", "fourd_budget", "4d_budget", "budget_toto", "budget_4d", "fourd_history_draws",
+    "4d_history_draws", "backtest_draws", "random_sets_per_draw", "offer_system7", "offer_system_7",
+    "system7",
+})
 
 _TRUE = frozenset({"true", "yes", "y", "on", "1"})
 _FALSE = frozenset({"false", "no", "n", "off", "0"})
@@ -167,7 +153,7 @@ def parse_bool(value: Any) -> bool | None:
 
 
 def normalise_key(key: Any) -> str:
-    """Match property names loosely: "TOTO budget" and "toto-budget" both mean toto_budget."""
+    """Match property names loosely: "Jackpot alert" and "jackpot-alert" both mean jackpot_alert."""
     k = re.sub(r"[\s\-]+", "_", str(key).strip().lower())
     return KEY_ALIASES.get(k, k)
 
@@ -245,9 +231,13 @@ def settings_from_mapping(data: dict | None) -> Settings:
 
     names = [f.name for f in fields(Settings) if f.name != "warnings"]
     values: dict[str, Any] = {}
+    retired: list[str] = []
     for key, raw in data.items():
         name = normalise_key(key)
         if name in OBSIDIAN_KEYS:
+            continue
+        if name in RETIRED_KEYS:
+            retired.append(name)
             continue
         if name not in names:
             shown = re.sub(r"[\-–—]+", " ", str(key)).strip()
@@ -257,6 +247,9 @@ def settings_from_mapping(data: dict | None) -> Settings:
             warnings.append(f"{name} is set more than once, so the last value is used.")
         values[name] = _coerce(name, raw, getattr(defaults, name), warnings)
 
+    if retired:
+        warnings.append(f"These settings are no longer used and can be deleted from {SETTINGS_NOTE}: "
+                        f"{', '.join(sorted(set(retired)))}.")
     settings = Settings(**values)
     settings.warnings = warnings
     return settings

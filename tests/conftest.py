@@ -10,7 +10,7 @@ import pytest
 os.environ["HUATBOT_NO_DOTENV"] = "1"
 
 from huatbot.models import PrizeRules, Settings
-from huatbot.synth import synth_fourd, synth_next_fourd, synth_next_toto, synth_toto
+from huatbot.synth import synth_next_toto, synth_toto
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -22,18 +22,8 @@ def toto_df():
 
 
 @pytest.fixture(scope="session")
-def fourd_df():
-    return synth_fourd(n_draws=500)
-
-
-@pytest.fixture(scope="session")
 def next_toto(toto_df):
     return synth_next_toto(toto_df)
-
-
-@pytest.fixture(scope="session")
-def next_fourd(fourd_df):
-    return synth_next_fourd(fourd_df)
 
 
 @pytest.fixture

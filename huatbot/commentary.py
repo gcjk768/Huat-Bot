@@ -21,7 +21,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from .textfmt import fmt_date, fmt_datetime, money, per_dollar, remove_dashes, toto_nums
+from .textfmt import fmt_date, fmt_datetime, money, pct, per_dollar, remove_dashes, toto_nums
 
 log = logging.getLogger(__name__)
 
@@ -35,13 +35,13 @@ DEFAULT_TIMEOUT = 120
 # "per $1" and "Group 1" are phrases, not computed results.
 ALWAYS_ALLOWED = frozenset({Decimal(1)})
 
-PROMPT_TEMPLATE = """You write a short commentary for a Singapore Pools TOTO and 4D update posted to Telegram.
+PROMPT_TEMPLATE = """You write a short commentary for a Singapore Pools TOTO update posted to Telegram.
 
 Rules:
 1. At most {max_words} words in one short paragraph of plain sentences. No markdown, no lists, no headings, no emojis.
 2. Use only the figures in the JSON below, written exactly as they appear there. Do not add, round, convert or calculate any number.
 3. Never use dashes or hyphens of any kind. Write negative amounts as "minus $20" and ranges with the word "to".
-4. Every draw is independent, so past results do not change the odds. Never suggest a strategy beats the odds and never suggest spending above the budget. Do not restate the independence point or the odds yourself: the message already says them once.
+4. Every draw is independent, so past results do not change the odds. Never suggest numbers to pick, never suggest any way to beat the odds and never urge anyone to buy more. Do not restate the independence point or the odds yourself: the message already says them once.
 5. Reply with the commentary text only.
 
 Figures (JSON):
@@ -93,18 +93,18 @@ def _latest_row(df: Any) -> Any:
     return df.loc[df["draw_number"].astype("int64").idxmax()]
 
 
-def _current(ctx: Any, game: str) -> bool:
+def _current(ctx: Any) -> bool:
     """False when the next draw info is about a draw already held (see report.next_info_is_current)."""
     try:
         from .report import next_info_is_current
-        return bool(next_info_is_current(ctx, game))
+        return bool(next_info_is_current(ctx))
     except Exception:  # a partial context in tests or an odd value: keep the figures
         return True
 
 
 def _next_toto(ctx: Any) -> dict:
     nt = getattr(ctx, "next_toto", None)
-    if nt is None or not _current(ctx, "toto"):
+    if nt is None or not _current(ctx):
         return {}
     dt = getattr(nt, "draw_datetime", None)
     jackpot = getattr(nt, "jackpot_estimate", None)
@@ -123,16 +123,23 @@ def _buy_signal(ctx: Any) -> dict:
     return {
         "label": _s(getattr(bs, "label", "") or ""),
         "return_per_dollar": per_dollar(ev) if ev is not None else None,
-        "draws_with_no_group_1_winner": _int(getattr(bs, "no_winner_streak", None)),
     }
 
 
-def _next_fourd(ctx: Any) -> dict:
-    nf = getattr(ctx, "next_fourd", None)
-    if nf is not None and not _current(ctx, "4d"):
+def _outlook(ctx: Any) -> dict:
+    out = getattr(ctx, "outlook", None)
+    steps = list(getattr(out, "steps", []) or []) if out is not None else []
+    if not steps:
         return {}
-    dt = getattr(nf, "draw_datetime", None) if nf is not None else None
-    return {"draw_time": fmt_datetime(dt)} if dt is not None else {}
+    big = out.biggest
+    return {
+        "jackpot_rollovers_so_far": _int(getattr(out, "snowball_draws", None)),
+        "chance_somebody_wins_next_draw": pct(steps[0].chance_won, 0),
+        "biggest_projected_jackpot": _money_auto(big.jackpot),
+        "biggest_projected_on": fmt_date(big.draw_date),
+        "chance_jackpot_gets_that_far": pct(big.chance_reached, 0),
+        "draws_until_cascade": _int(getattr(out, "draws_to_cascade", None)),
+    }
 
 
 def _latest_toto(ctx: Any) -> dict:
@@ -150,49 +157,15 @@ def _latest_toto(ctx: Any) -> dict:
     }
 
 
-def _latest_fourd(ctx: Any) -> dict:
-    row = _latest_row(getattr(ctx, "fourd", None))
-    if row is None:
+def _history(ctx: Any) -> dict:
+    h = getattr(ctx, "history", None)
+    if h is None or not getattr(h, "draws", 0):
         return {}
     return {
-        "draw": _int(row.get("draw_number")),
-        "date": fmt_date(row.get("draw_date")),
-        "first": _s(row.get("first") or ""),
-        "second": _s(row.get("second") or ""),
-        "third": _s(row.get("third") or ""),
+        "draws_stored": _int(h.draws),
+        "share_of_draws_with_a_group_1_winner": pct(h.won_share, 0),
+        "average_draws_a_jackpot_lasts": round(float(h.average_run), 1) if h.average_run is not None else None,
     }
-
-
-def _line_label(line: Any) -> str:
-    """ "Low Crowd (Ordinary)", "Hot Digits (Big)", or just "System 7" when the bet type repeats it."""
-    label, bet = _s(getattr(line, "label", "")), _s(getattr(line, "bet_type", "") or "")
-    return f"{label} ({bet})" if bet and bet != label else label
-
-
-def _plan(plan: Any, picks: Iterable[Any]) -> dict:
-    if plan is not None:
-        lines = list(getattr(plan, "lines", []) or [])
-        alternative = getattr(plan, "alternative", None)
-        return {
-            "buy": [_line_label(line) for line in lines],
-            "total_cost": _money_auto(getattr(plan, "total", None)),
-            "budget": _money_auto(getattr(plan, "budget", None)),
-            "alternative_total_cost": _money_auto(alternative.total) if alternative is not None else None,
-        }
-    names = [_s(getattr(p, "name", "")) for p in picks or []]
-    return {"strategies": names}
-
-
-def _backtest(result: Any) -> dict:
-    if result is None:
-        return {}
-    scores = {}
-    for sc in getattr(result, "scores", []) or []:
-        scores[_s(sc.name)] = _compact({
-            "verdict": _s(sc.verdict or ""),
-            "return_per_dollar": per_dollar(sc.return_per_dollar),
-        })
-    return {"draws_tested": _int(getattr(result, "draws_tested", None)), "strategies": scores}
 
 
 def _ledger(ctx: Any) -> dict:
@@ -229,22 +202,17 @@ def _json_safe(obj: Any) -> Any:
 def figures_from_context(ctx: Any) -> dict:
     """A small JSON safe dict of computed figures for the commentary, formatted as the user sees them.
 
-    Covers the next TOTO draw (jackpot, type), buy signal (label, return per $1, no winner
-    streak), next 4D draw, latest results for the games reported this run, the suggested
-    purchases, backtest verdicts and ledger totals. Missing parts of the context are skipped;
-    a broken part is logged and skipped rather than raised.
+    Covers the next draw (jackpot, type), the buy signal, the jackpot outlook, the latest result
+    when it is new this run, the jackpot history and the ledger totals. Missing parts of the
+    context are skipped; a broken part is logged and skipped rather than raised.
     """
-    games = tuple(getattr(ctx, "games_drawn", ("toto", "4d")) or ())
+    new = bool(getattr(ctx, "new_draws", None))
     sections: list[tuple[str, Callable[[], dict]]] = [
         ("next_toto", lambda: _next_toto(ctx)),
         ("buy_signal", lambda: _buy_signal(ctx)),
-        ("next_4d", lambda: _next_fourd(ctx)),
-        ("latest_toto", lambda: _latest_toto(ctx) if "toto" in games else {}),
-        ("latest_4d", lambda: _latest_fourd(ctx) if "4d" in games else {}),
-        ("toto_suggestions", lambda: _plan(getattr(ctx, "toto_plan", None), getattr(ctx, "toto_picks", []))),
-        ("4d_suggestions", lambda: _plan(getattr(ctx, "fourd_plan", None), getattr(ctx, "fourd_picks", []))),
-        ("toto_backtest", lambda: _backtest(getattr(ctx, "toto_backtest", None))),
-        ("4d_backtest", lambda: _backtest(getattr(ctx, "fourd_backtest", None))),
+        ("jackpot_outlook", lambda: _outlook(ctx)),
+        ("latest_toto", lambda: _latest_toto(ctx) if new else {}),
+        ("jackpot_history", lambda: _history(ctx)),
         ("my_tickets", lambda: _ledger(ctx)),
     ]
     figures: dict[str, Any] = {}
@@ -279,7 +247,7 @@ def _normalise_times(text: str) -> str:
 def number_tokens(text: str) -> list[Decimal | str]:
     """Every number in the text as a Decimal (thousands separators ignored), times as "6.30pm".
 
-    "$3.5 million" counts as 3500000, "1st" as 1, and the "4" in "4D" is the game name, not a number.
+    "$3.5 million" counts as 3500000 and "1st" as 1.
     """
     tokens: list[Decimal | str] = []
     text = _normalise_times(text)
@@ -288,8 +256,6 @@ def number_tokens(text: str) -> list[Decimal | str]:
         if suffix in ("am", "pm"):
             tokens.append(f"{whole}{frac}{suffix}")
             continue
-        if suffix == "d" and whole == "4" and not frac:
-            continue  # the game "4D"
         try:
             value = Decimal(whole.replace(",", "") + frac)
         except InvalidOperation:

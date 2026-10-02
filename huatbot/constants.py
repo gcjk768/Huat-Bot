@@ -1,4 +1,4 @@
-"""Fixed facts about Singapore Pools TOTO and 4D.
+"""Fixed facts about Singapore Pools TOTO.
 
 Prize percentages and amounts here are the built in fallback. At run time
 ``prize_rules.load_prize_rules`` tries to confirm them against the official
@@ -15,20 +15,16 @@ BASE = "https://www.singaporepools.com.sg"
 ARCHIVE = f"{BASE}/DataFileArchive/Lottery/Output"
 
 TOTO_DRAW_LIST_URL = f"{ARCHIVE}/toto_result_draw_list_en.html"
-FOURD_DRAW_LIST_URL = f"{ARCHIVE}/fourd_result_draw_list_en.html"
 
 TOTO_RESULT_URL = f"{BASE}/en/product/sr/Pages/toto_results.aspx?sppl={{sppl}}"
-FOURD_RESULT_URL = f"{BASE}/en/product/Pages/4d_results.aspx?sppl={{sppl}}"
 
 TOTO_NEXT_DRAW_URL = f"{ARCHIVE}/toto_next_draw_estimate_en.html"
-FOURD_NEXT_DRAW_URL = f"{ARCHIVE}/fourd_next_draw_info_en.html"
 
 TOTO_CASCADE_LIST_URL = f"{ARCHIVE}/toto_result_cascade_draw_list_en.html"
 TOTO_HONGBAO_LIST_URL = f"{ARCHIVE}/toto_result_hongbao_draw_list_en.html"
 TOTO_SPECIAL_LIST_URL = f"{ARCHIVE}/toto_result_special_draw_list_en.html"
 
 TOTO_PRIZE_RULES_URL = "https://online2.singaporepools.com/en/lottery/toto-prize-structure"
-FOURD_PRIZE_RULES_URL = "https://online2.singaporepools.com/en/lottery/4d-prize-structure"
 
 BROWSER_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -68,25 +64,10 @@ TOTO_SYSTEM_BOARDS = {n: comb(n, 6) for n in range(7, 13)}  # 7:7, 8:28, 9:84, 1
 
 TOTO_DRAW_TYPES = ("normal", "cascade", "hongbao", "special")
 
-# 4D
-
-FOURD_TIERS = ("first", "second", "third", "starter", "consolation")
-FOURD_TIER_COUNTS = {"first": 1, "second": 1, "third": 1, "starter": 10, "consolation": 10}
-FOURD_NUMBERS_PER_DRAW = 23
-FOURD_SPACE = 10_000
-
-# Prize per $1 stake.
-FOURD_PRIZES = {
-    "big": {"first": 2000.0, "second": 1000.0, "third": 490.0, "starter": 250.0, "consolation": 60.0},
-    "small": {"first": 3000.0, "second": 2000.0, "third": 800.0},
-}
-FOURD_POSITIONS = ("thousands", "hundreds", "tens", "units")
-
 # Schedule (Singapore time)
 
 SG_TZ_NAME = "Asia/Singapore"
 TOTO_WEEKDAYS = (0, 3)  # Mon, Thu
-FOURD_WEEKDAYS = (2, 5, 6)  # Wed, Sat, Sun
 DRAW_TIME = time(18, 30)
 DEFAULT_RUN_TIME = time(19, 30)
 DEFAULT_RETRY_MINUTES = 10

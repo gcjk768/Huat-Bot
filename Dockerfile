@@ -1,4 +1,4 @@
-# Huat Bot: Singapore Pools 4D and TOTO analyst for a home NAS.
+# Huat Bot: Singapore Pools TOTO results, next draw and next big prize, for a home NAS.
 #
 #   docker build -t huat-bot .
 #   docker build -t huat-bot --build-arg INSTALL_CLAUDE=true .   # adds Node.js and the Claude Code CLI
@@ -22,7 +22,7 @@ FROM node:${NODE_MAJOR}-trixie-slim AS node
 FROM python:3.12-slim AS base
 
 LABEL org.opencontainers.image.title="Huat Bot" \
-      org.opencontainers.image.description="Singapore Pools 4D and TOTO analyst that posts to Telegram and keeps everything in an Obsidian vault" \
+      org.opencontainers.image.description="Singapore Pools TOTO results, next draw outlook and next big prize, posted to Telegram and kept in an Obsidian vault" \
       org.opencontainers.image.source="https://github.com/gcjk768/Huat-Bot"
 
 ENV TZ=Asia/Singapore \

@@ -35,15 +35,15 @@ BRAND = {
     "claude": "#D97757",
     "pandas": "#150458",
     "numpy": "#013243",
-    "scipy": "#8CAAE6",
 }
 
 ACCENT = {
     "pools": "#E11D48",
     "scrape": "#0EA5E9",
-    "analyse": "#8B5CF6",
-    "backtest": "#F59E0B",
-    "suggest": "#10B981",
+    "tickets": "#8B5CF6",
+    "wait": "#F59E0B",
+    "outlook": "#10B981",
+    "signal": "#EAB308",
     "alert": "#EF4444",
     "vault": "#7C3AED",
     "post": "#26A5E4",
@@ -479,10 +479,10 @@ def architecture(theme: str, linked: bool = False) -> Diagram:
     )
     g.vertex("text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;fontSize=38;"
              "fontStyle=1;fontColor=#DC2626;fontFamily=Helvetica;", 36, 28, 220, 50, "Huat Bot")
-    g.text(42, 96, "Singapore Pools 4D and TOTO analyst that lives on your NAS", size=15.5, color=t["muted"])
-    g.text(712, 44, "BUILT WITH", size=10.5, weight=700, color=t["faint"], spacing=1.6)
-    for i, b in enumerate(("python", "pandas", "numpy", "scipy", "docker")):
-        g.icon(712 + i * 52, 54, 20, brand=b, tile_size=38)
+    g.text(42, 96, "Singapore Pools TOTO: what the next draws will do and the next big prize", size=15.5, color=t["muted"])
+    g.text(764, 44, "BUILT WITH", size=10.5, weight=700, color=t["faint"], spacing=1.6)
+    for i, b in enumerate(("python", "pandas", "numpy", "docker")):
+        g.icon(764 + i * 52, 54, 20, brand=b, tile_size=38)
     g.svg.append(f'<path d="M40 126 H960" stroke="{t["stroke"]}" stroke-width="1"/>')
 
     # left column
@@ -496,8 +496,8 @@ def architecture(theme: str, linked: bool = False) -> Diagram:
     # NAS
     g.container("nas", 296, 146, 408, 518, "UGREEN NAS", glyph="nas", accent=t["muted"])
     g.card("docker", 318, 186, 364, 214, "huat-bot container",
-           ["Fetches only the missing draws", "Analyses, backtests and suggests", "Checks your tickets",
-            "Posts three Telegram messages"],
+           ["Fetches only the missing draws", "Checks your tickets",
+            "Projects the jackpot to the cascade", "Posts two Telegram messages"],
            accent=ACCENT["docker"], brand="docker")
     # schedule pill inside the docker card
     sx, sy, sw = 336, 354, 328
@@ -521,8 +521,8 @@ def architecture(theme: str, linked: bool = False) -> Diagram:
     g.svg.append(f'<path d="M476 540 V630" stroke="{t["stroke"]}"/>')
 
     # right column
-    g.card("telegram", 738, 160, 232, 230, "Telegram channel", [], accent=ACCENT["post"], brand="telegram")
-    for i, s in enumerate(("Results and ticket check", "Next draw and buy signal", "Numbers to buy and cost")):
+    g.card("telegram", 738, 160, 232, 184, "Telegram channel", [], accent=ACCENT["post"], brand="telegram")
+    for i, s in enumerate(("Result and ticket check", "Next draw and big prize")):
         y = 232 + i * 46
         g.svg.append(
             f'<rect x="754" y="{y}" width="200" height="36" rx="10" fill="{ACCENT["post"]}" fill-opacity="{t["tint"]}"/>'
@@ -551,7 +551,7 @@ def architecture(theme: str, linked: bool = False) -> Diagram:
     g.edge("claude", "docker", [(146, 466), (146, 420), (300, 420), (300, 330), (318, 330)],
            color=ACCENT["claude"], dashed=True)
 
-    g.text(500, 694, "Every figure comes from Python. Draws are independent, so no strategy changes the odds.",
+    g.text(500, 694, "Every figure comes from Python. Draws are independent, so the bot never suggests numbers.",
            size=12.5, color=t["muted"], anchor="middle")
     return g
 
@@ -562,7 +562,7 @@ def draw_day(theme: str, linked: bool = False) -> Diagram:
     t = THEMES[theme]
     g = Diagram("Huat Bot draw day", 1000, 600, t, linked=linked)
     g.text(40, 58, "What happens on a draw day", size=28, weight=800)
-    g.text(42, 86, "TOTO on Monday and Thursday, 4D on Wednesday, Saturday and Sunday, plus special draws",
+    g.text(42, 86, "TOTO on Monday and Thursday at 6.30pm, plus Hongbao and special draws",
            size=14.5, color=t["muted"])
     g.svg.append(f'<path d="M40 110 H960" stroke="{t["stroke"]}" stroke-width="1"/>')
 
@@ -572,27 +572,27 @@ def draw_day(theme: str, linked: bool = False) -> Diagram:
            glyph="ball", **r1)
     g.card("wake", 228, 150, 176, 116, "Bot wakes", ["7.30pm", "Singapore time"], accent=ACCENT["scrape"],
            glyph="clock", **r1)
-    g.diamond("check", 428, 146, 164, 124, "Result out?", ACCENT["backtest"])
-    g.card("wait", 616, 150, 166, 116, "Wait", ["10 minutes, then", "check again"], accent=ACCENT["backtest"],
+    g.diamond("check", 428, 146, 164, 124, "Result out?", ACCENT["wait"])
+    g.card("wait", 616, 150, 166, 116, "Wait", ["10 minutes, then", "check again"], accent=ACCENT["wait"],
            glyph="clock", **r1)
     g.card("alert", 804, 150, 166, 116, "Alert", ["after 2 hours,", "on Telegram"], accent=ACCENT["alert"],
            glyph="bell", **r1)
 
     g.edge("draw", "wake", [(206, 208), (228, 208)])
     g.edge("wake", "check", [(404, 208), (428, 208)])
-    g.edge("check", "wait", [(592, 208), (616, 208)], label="no", label_at=(604, 186), label_color=ACCENT["backtest"])
-    g.edge("wait", "check", [(699, 150), (699, 128), (510, 128), (510, 146)], color=ACCENT["backtest"],
-           label="retry", label_at=(604, 128), label_color=ACCENT["backtest"])
+    g.edge("check", "wait", [(592, 208), (616, 208)], label="no", label_at=(604, 186), label_color=ACCENT["wait"])
+    g.edge("wait", "check", [(699, 150), (699, 128), (510, 128), (510, 146)], color=ACCENT["wait"],
+           label="retry", label_at=(604, 128), label_color=ACCENT["wait"])
     g.edge("wait", "alert", [(782, 208), (804, 208)], color=ACCENT["alert"])
 
     # row 2: the run
     steps = [
         ("fetch", "Fetch", ["only the draws", "that are missing"], ACCENT["scrape"], "download", None),
-        ("analyse", "Analyse", ["frequency, chi", "square, crowd score"], ACCENT["analyse"], "chart", None),
-        ("backtest", "Backtest", ["300 draws versus", "1,000 random sets"], ACCENT["backtest"], "history", None),
-        ("suggest", "Suggest", ["picks in budget", "and a buy signal"], ACCENT["suggest"], "target", None),
+        ("tickets", "Tickets", ["check each one,", "update the ledger"], ACCENT["tickets"], "ticket", None),
+        ("outlook", "Outlook", ["jackpot draw by", "draw to cascade"], ACCENT["outlook"], "chart", None),
+        ("signal", "Big prize", ["buy signal and", "the next big prize"], ACCENT["signal"], "target", None),
         ("vaultw", "Vault", ["tickets, ledger,", "notes and log"], ACCENT["vault"], None, "obsidian"),
-        ("post", "Post", ["three messages", "to your channel"], ACCENT["post"], None, "telegram"),
+        ("post", "Post", ["two messages", "to your channel"], ACCENT["post"], None, "telegram"),
     ]
     x, w, gap, y, h = 32, 136, 24, 336, 150
     for i, (cid, title, lines, accent, glyph, brand) in enumerate(steps):
@@ -601,8 +601,8 @@ def draw_day(theme: str, linked: bool = False) -> Diagram:
     for i in range(len(steps) - 1):
         x0 = x + i * (w + gap) + w
         g.edge(steps[i][0], steps[i + 1][0], [(x0, y + h / 2), (x0 + gap, y + h / 2)])
-    g.edge("check", "fetch", [(510, 270), (510, 302), (100, 302), (100, 336)], color=ACCENT["suggest"],
-           label="yes", label_at=(510, 294), label_color=ACCENT["suggest"])
+    g.edge("check", "fetch", [(510, 270), (510, 302), (100, 302), (100, 336)], color=ACCENT["outlook"],
+           label="yes", label_at=(510, 294), label_color=ACCENT["outlook"])
 
     # footer
     fy = 516
@@ -611,7 +611,7 @@ def draw_day(theme: str, linked: bool = False) -> Diagram:
     )
     g.vertex("rounded=1;arcSize=25;html=1;fillColor=#FFFFFF;strokeColor=#E2E8F0;", 30, fy, 940, 52)
     g.icon(44, fy + 8, 22, brand="docker", tile_size=36)
-    g.text(92, fy + 31, "Dry run prints the three messages instead of posting. Each message stays under "
+    g.text(92, fy + 31, "Dry run prints the two messages instead of posting. Each message stays under "
                         "4,000 characters, and a draw is never posted twice.", size=13, color=t["muted"])
     return g
 

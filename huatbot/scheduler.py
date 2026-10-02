@@ -1,12 +1,12 @@
 """When to run: draw days, the 7.30pm run, and waiting for results to be published.
 
-TOTO draws on Monday and Thursday, 4D on Wednesday, Saturday and Sunday, at 6.30pm
-Singapore time, plus special draws on other days (read from the next draw pages and kept
+TOTO draws on Monday and Thursday at 6.30pm Singapore time, plus special draws on other days (read from the next draw pages and kept
 in the vault's state.json under ``upcoming_draws``, see ``remember_upcoming``). The bot runs
 at 7.30pm on a draw day (or an hour after a draw announced for later that evening); if the
-new result is not on the site yet it checks again every 10 minutes for up to 2 hours. Each
-game is run as soon as its result is out, and run again at the next check while the run
-did not store or post it.
+new result is not on the site yet it checks again every 10 minutes for up to 2 hours. The
+run starts as soon as the result is out, and runs again at the next check while the run did
+not store or post it. The code keeps a tuple of games so a game could be added back later;
+today it only holds "toto".
 
 Every function takes its clock (``now_fn``) and sleep (``sleep_fn``) as arguments, so the
 tests drive whole days with a fake clock and never sleep for real.
@@ -27,11 +27,11 @@ log = logging.getLogger(__name__)
 
 SG = ZoneInfo(C.SG_TZ_NAME)
 
-GAMES = ("toto", "4d")
-GAME_WEEKDAYS = {"toto": tuple(C.TOTO_WEEKDAYS), "4d": tuple(C.FOURD_WEEKDAYS)}
-GAME_LABELS = {"toto": "TOTO", "4d": "4D"}
+GAMES = ("toto",)
+GAME_WEEKDAYS = {"toto": tuple(C.TOTO_WEEKDAYS)}
+GAME_LABELS = {"toto": "TOTO"}
 # Other spellings of the game keys that may appear in state.json.
-_STATE_KEYS = {"toto": ("toto", "TOTO"), "4d": ("4d", "4D", "fourd")}
+_STATE_KEYS = {"toto": ("toto", "TOTO")}
 # state.json key holding every announced draw date that is not past yet (see remember_upcoming).
 UPCOMING_KEY = "upcoming_draws"
 
@@ -155,8 +155,8 @@ def _checked_on(state: Mapping) -> date | None:
 
 
 def remember_upcoming(state: dict, previous: Mapping | None = None) -> dict:
-    """Keep every announced draw date in ``state["upcoming_draws"]`` (``{"toto": [ISO dates],
-    "4d": [...]}``) and return ``state``.
+    """Keep every announced draw date in ``state["upcoming_draws"]`` (``{"toto": [ISO dates]}``)
+    and return ``state``.
 
     The next draw page only ever shows one date per game and every refresh replaces it, so a
     special draw announced on Thursday for Friday is gone from ``next_draws`` once the page
@@ -183,7 +183,7 @@ def remember_upcoming(state: dict, previous: Mapping | None = None) -> dict:
 
 
 def games_on(d: date, state: dict | None) -> tuple[str, ...]:
-    """Games drawn on day ``d``, in the order ("toto", "4d").
+    """Games drawn on day ``d`` (today only "toto").
 
     A game counts when ``d`` is one of its regular weekdays, or when ``d`` is a draw date
     recorded for it in ``state["next_draws"]`` or ``state["upcoming_draws"]`` (special draws on

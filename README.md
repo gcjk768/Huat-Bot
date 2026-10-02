@@ -2,20 +2,21 @@
 
 # Huat Bot
 
-**Singapore Pools 4D and TOTO analyst that lives on your NAS**
+**Singapore Pools TOTO: the latest result, what the next draws will do and where the next big prize is**
 
 [![Python](https://img.shields.io/badge/Python-3.11%20%7C%203.12-3776AB?logo=python&logoColor=white)](https://www.python.org)
 [![Docker](https://img.shields.io/badge/Docker-compose-2496ED?logo=docker&logoColor=white)](docker-compose.yml)
-[![Telegram](https://img.shields.io/badge/Telegram-3%20messages-26A5E4?logo=telegram&logoColor=white)](#telegram-bot-and-channel)
+[![Telegram](https://img.shields.io/badge/Telegram-2%20messages-26A5E4?logo=telegram&logoColor=white)](#telegram-bot-and-channel)
 [![Obsidian](https://img.shields.io/badge/Obsidian-vault-7C3AED?logo=obsidian&logoColor=white)](#the-vault)
 [![draw.io](https://img.shields.io/badge/diagrams-draw.io-F08705?logo=diagramsdotnet&logoColor=white)](docs/diagrams)
 [![Tests](https://github.com/gcjk768/Huat-Bot/actions/workflows/ci.yml/badge.svg)](https://github.com/gcjk768/Huat-Bot/actions/workflows/ci.yml)
 
 </div>
 
-It fetches every result, analyses the history, suggests numbers that fit your budget, checks your
-tickets, posts three short messages to your Telegram channel on draw days, and keeps everything it
-reads and writes inside your Obsidian vault.
+It lives on your NAS. On every TOTO draw day it fetches the result, checks your tickets, works out
+what the next draws are likely to do (how big the jackpot gets, the chance somebody wins it, when it
+cascades) and where the next big prize is, posts two short messages to your Telegram channel, and
+keeps everything it reads and writes inside your Obsidian vault.
 
 <p align="center">
   <picture>
@@ -31,8 +32,8 @@ reads and writes inside your Obsidian vault.
 
 > [!NOTE]
 > Every figure comes from Python code. If you switch on the optional commentary, Claude only writes a
-> short comment about figures the code already computed. Every draw is independent, so nothing here
-> changes your odds of winning; the bot helps you spend within a budget and avoid sharing prizes.
+> short comment about figures the code already computed. Every draw is independent, so the bot never
+> suggests numbers: no pattern in past results makes any set of numbers more likely to win.
 
 ## Contents
 
@@ -46,38 +47,62 @@ reads and writes inside your Obsidian vault.
 * [Schedule and retries](#schedule-and-retries)
 * [Commands](#commands)
 * [Settings](#settings)
-* [How the numbers are worked out](#how-the-numbers-are-worked-out)
+* [How the figures are worked out](#how-the-figures-are-worked-out)
 * [Optional Claude commentary](#optional-claude-commentary)
 * [Troubleshooting](#troubleshooting)
 * [Updating](#updating)
+* [Upgrading from the 4D and suggestions version](#upgrading-from-the-4d-and-suggestions-version)
 * [Development](#development)
 
 ## What it does
 
 | Step | What happens |
 | --- | --- |
-| Fetch | Downloads only the draws that are missing: TOTO from draw 2995 (9 Oct 2014, the first draw of the current 6 from 49 format) and the latest 1,000 4D draws. At most 4 requests at a time, with a pause, slowing down if the site complains. Checks that each page is the draw it asked for and that the newest stored draw matches the latest one on the site. |
-| Prize rules | Reads the official TOTO and 4D prize structure pages and says plainly whether the prize percentages were confirmed or the built in values were used. |
-| Analyse TOTO | Frequency (all time, last 100, last 50), overdue numbers, common pairs, the usual shape of a winning set, a chi square fairness test and a crowd score for each number. |
-| Analyse 4D | Digit frequency per position, numbers that won more than once, common digit sets, a chi square test, and the average return per $1 for Big, Small and iBet. |
-| Backtest | Replays the last 300 draws: each strategy only sees the draws before it, and is scored with the prize amounts really paid, against 1,000 random players. |
-| Suggest | One TOTO set per strategy (Hot, Overdue, Balanced, Low Crowd), an optional System 7, and five 4D numbers with a bet type and stake. The total never goes above your budget. |
-| Buy signal | Estimated return per $1 for the next TOTO draw at its jackpot, labelled HIGH, MEDIUM or LOW. |
+| Fetch | Downloads only the TOTO draws that are missing, from draw 2995 (9 Oct 2014, the first draw of the current 6 from 49 format). At most 4 requests at a time, with a pause, slowing down if the site complains. Checks that each page is the draw it asked for and that the newest stored draw matches the latest one on the site. |
+| Prize rules | Reads the official TOTO prize structure page and says plainly whether the prize percentages were confirmed or the built in values were used. |
+| Next draw | Reads the next draw page: date, estimated jackpot and whether it is a normal, cascade, Hongbao or special draw. |
+| What TOTO will do | Projects the jackpot draw by draw until it cascades: how big it gets if nobody wins it, how many boards each draw is likely to sell, the chance somebody wins Group 1 at each draw and the chance it is still unwon by then. |
+| Next big prize | The biggest jackpot on the way (usually the cascade draw), when it comes, how likely it is to get that far, plus any announced Hongbao or special draw. |
+| Buy signal | The average return per $1 for the next draw at its jackpot, labelled HIGH, MEDIUM or LOW. |
+| Jackpot history | How often Group 1 is won, how long a jackpot usually lasts, how many cascaded, and the biggest jackpots so far. |
 | Tickets | Reads your tickets from `Tickets.md`, checks each one once its result is out, and keeps a ledger with total spent, won and net. |
-| Vault | Writes a dashboard, the ledger, a note per draw, suggestion notes, a full report per run and an activity log, all in your Obsidian vault. |
-| Telegram | Posts three messages: 1) latest results and your ticket check, 2) next draws, jackpot and buy signal, 3) suggested numbers and cost. Each stays under 4,000 characters. A draw is never posted twice. |
+| Vault | Writes a dashboard, the ledger, a note per draw, a full report per run and an activity log, all in your Obsidian vault. |
+| Telegram | Posts two messages: 1) the latest result and your ticket check, 2) the next draw, its jackpot and buy signal, and the next big prize. Each stays under 4,000 characters. A draw is never posted twice. |
+
+What it does not do: it never suggests numbers to pick. Every draw is independent and every set of
+six numbers has exactly the same chance, so "hot", "cold" or "overdue" numbers are not a thing.
+
+Message 2 looks like this (from the demo):
+
+```text
+Next TOTO draw (draw 4124): Mon 5 Oct 2026, 6.30pm
+Estimated jackpot: $2,100,000
+Draw type: Normal
+Jackpot rollovers so far: 1 of 3, then it cascades
+Chance somebody wins Group 1 at this draw: 24%
+Buy signal: MEDIUM
+Return per $1: $0.45 on average
+
+Next big prize
+If nobody wins Group 1 first, the jackpot snowballs to about $4,015,000 at the cascade
+draw on Mon 12 Oct 2026 (55% chance it gets that far). The chance somebody wins it before
+then is about 62%.
+Draw        Jackpot  Unwon  Won
+Mon 5 Oct    $2.10m   100%  24%
+Thu 8 Oct    $3.00m    76%  27%
+Mon 12 Oct   $4.01m    55%  30%
+```
 
 ## The honest odds note
 
 > Every draw is independent, so past results do not change the odds. TOTO Group 1 is 1 in
-> 13,983,816 per board, and any TOTO prize is about 1 in 54. A 4D Big bet wins some prize 23 times
-> in 10,000. TOTO pays about 54% of sales back as prizes and a 4D Big bet returns about $0.66 per $1
-> on average, so no number or strategy beats the odds.
+> 13,983,816 per board, and any TOTO prize is about 1 in 54. TOTO pays about 54% of sales back as
+> prizes, so on average each $1 brings back about 54 cents.
 
-The bot says this in every report. Hot, overdue and balanced picks are for fun. The only thing a
-strategy can change is how many people you share a prize with, which is what the crowd score is
-about. The backtest tells you, draw by draw, whether any strategy did better than random players. It
-almost never does, and the bot says so. Never spend above your budget.
+The bot says this in every report. The chances it shows (24%, 62% and so on) are the chances that
+**anybody** in Singapore wins Group 1 at a draw, not that you do. A snowballed jackpot can lift one
+draw's average return per $1, even above $1, but almost every ticket still wins nothing. Never spend
+more than you planned.
 
 ## Quick start
 
@@ -222,7 +247,7 @@ The NAS needs outbound HTTPS (port 443) to:
 | Host | Why |
 | --- | --- |
 | `www.singaporepools.com.sg` | results, draw lists, next draw and jackpot pages |
-| `online2.singaporepools.com` | official TOTO and 4D prize structure pages |
+| `online2.singaporepools.com` | the official TOTO prize structure page |
 | `api.telegram.org` | posting the messages |
 | `api.anthropic.com` | only if you turn on the Claude commentary |
 
@@ -258,13 +283,13 @@ Run these once before leaving the bot to its schedule. With the Docker app, type
 
 | Order | Command | What it does |
 | --- | --- | --- |
-| 1 | `python -m huatbot check-site` | Reads every Singapore Pools page the bot uses (draw lists, the latest TOTO and 4D result, next draw pages, draw type lists, prize pages) and prints a PASS or FAIL line for each. Nothing is saved. |
-| 2 | `python -m huatbot demo` | Runs the whole pipeline on synthetic draws, with no network, and prints the three messages. Nothing is posted. It writes to a separate demo vault, never to your real one. In Docker that demo vault lives inside the container and is thrown away afterwards. |
-| 3 | `python -m huatbot run --dry-run` | A real run: fills the vault, downloads the full history, writes the notes and the report, and prints the three messages instead of posting them. The first download is over 2,000 result pages, so give it about 15 to 30 minutes. Later runs only fetch the new draws. |
+| 1 | `python -m huatbot check-site` | Reads every Singapore Pools page the bot uses (the draw list, the latest result, the next draw page, the cascade, Hongbao and special draw lists, the prize page) and prints a PASS or FAIL line for each. Nothing is saved. |
+| 2 | `python -m huatbot demo` | Runs the whole pipeline on synthetic draws, with no network, and prints the two messages. Nothing is posted. It writes to a separate demo vault, never to your real one. In Docker that demo vault lives inside the container and is thrown away afterwards. |
+| 3 | `python -m huatbot run --dry-run` | A real run: fills the vault, downloads the full history, writes the notes and the report, and prints the two messages instead of posting them. The first download is over 1,100 result pages, so give it about 10 to 20 minutes. Later runs only fetch the new draws. |
 | 4 | `python -m huatbot serve` | The scheduler. This is what the container runs by default, so `docker compose up -d` (or the Docker app project) starts it. |
 
 After step 3, open the vault in Obsidian and look at `Huat Bot/Dashboard.md`. Edit
-`Huat Bot/Settings.md` to set your budgets, and add your tickets to `Huat Bot/Tickets.md`.
+`Huat Bot/Settings.md` to set your jackpot alert, and add your tickets to `Huat Bot/Tickets.md`.
 
 ## The vault
 
@@ -275,30 +300,23 @@ MyVault/
 ├── .obsidian/                          never touched
 ├── (your own notes)                    never touched
 └── Huat Bot/
-    ├── Settings.md                     you edit: budgets and options as note properties
+    ├── Settings.md                     you edit: jackpot alert and options as note properties
     ├── Tickets.md                      you edit: one ticket per table row
-    ├── Dashboard.md                    next draws, buy signal, latest results, plan, totals
+    ├── Dashboard.md                    next draw, buy signal, the next big prize, latest result, totals
     ├── Ledger.md                       every ticket, what it won, totals, unreadable lines
-    ├── Draws/
-    │   ├── TOTO/2026-10-01 TOTO 4123.md
-    │   └── 4D/2026-09-30 4D 5432.md
-    ├── Suggestions/
-    │   ├── 2026-10-05 TOTO 4124.md
-    │   └── 2026-10-03 4D 5433.md
+    ├── Draws/TOTO/2026-10-01 TOTO 4123.md
     ├── Reports/2026-10-02 1930 Report.md
     ├── Logs/2026-10 Activity.md        a row for every fetch, new draw, ticket check, note, post and error
     └── Data/
         ├── toto.csv
-        ├── fourd.csv
         ├── ledger.csv
         ├── state.json                  next draw dates and what was already posted
-        ├── prize_rules.json            prize rules cache (checked again after 7 days)
-        └── backtest_cache.json         backtest results, reused until a new draw or a settings change
+        └── prize_rules.json            prize rules cache (checked again after 7 days)
 ```
 
 | You edit | The bot writes |
 | --- | --- |
-| `Settings.md`: the properties at the top of the note (see [Settings](#settings)). Read at the start of every run. | `Dashboard.md`, `Ledger.md`, draw notes, suggestion notes, reports and the activity log. They are rewritten by the bot, so do not edit them (your changes would be replaced). |
+| `Settings.md`: the properties at the top of the note (see [Settings](#settings)). Read at the start of every run. | `Dashboard.md`, `Ledger.md`, draw notes, reports and the activity log. They are rewritten by the bot, so do not edit them (your changes would be replaced). |
 | `Tickets.md`: one row per ticket in the table. | `Data/*.csv` and the JSON files. You can open the CSVs in a spreadsheet, but keep the bot stopped while you edit them. |
 
 `Settings.md` and `Tickets.md` are created with defaults and examples on the first run (or with
@@ -310,12 +328,10 @@ A ticket row looks like this (copy the examples at the bottom of `Tickets.md`):
 | --- | --- | --- | --- | --- |
 | TOTO | 5 Oct 2026 | 3 11 19 27 38 45 | Ordinary | $1 |
 | TOTO | 5 Oct 2026 | 3 11 19 27 38 45 49 | System 7 | $7 |
-| 4D | 4 Oct 2026 | 0042 | Big | $2 |
-| 4D | 4 Oct 2026 | 1234 | iBet Big | $1 |
 
-Dates can be written `5 Oct 2026`, `Mon 5 Oct 2026` or `5/10/2026` (day first). TOTO bet types are
-Ordinary and System 7 to System 12; 4D bet types are Big, Small, iBet Big and iBet Small. A row the bot
-cannot read is listed in `Ledger.md` with the reason.
+Dates can be written `5 Oct 2026`, `Mon 5 Oct 2026` or `5/10/2026` (day first). Bet types are
+Ordinary and System 7 to System 12. A row the bot cannot read is listed in `Ledger.md` with the
+reason.
 
 | You change a row | What the ledger does |
 | --- | --- |
@@ -329,19 +345,19 @@ cannot read is listed in `Ledger.md` with the reason.
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/diagrams/draw-day-dark.svg">
-    <img alt="On a draw day the bot wakes at 7.30pm, waits for the result, then fetches, analyses, backtests, suggests, writes the vault and posts" src="docs/diagrams/draw-day-light.svg" width="100%">
+    <img alt="On a draw day the bot wakes at 7.30pm, waits for the result, then fetches, checks tickets, projects the jackpot, writes the vault and posts" src="docs/diagrams/draw-day-light.svg" width="100%">
   </picture>
 </p>
 
 | When | What happens |
 | --- | --- |
-| Draw days | TOTO on Monday and Thursday, 4D on Wednesday, Saturday and Sunday, all at 6.30pm Singapore time. Special draws on other days are picked up from the next draw pages and kept in `Data/state.json`. |
+| Draw days | Monday and Thursday at 6.30pm Singapore time. Hongbao and special draws on other days are picked up from the next draw page and kept in `Data/state.json`. |
 | Run time | 7.30pm Singapore time on a draw day (`RUN_AT`). |
 | Retries | If the new result is not on the site yet, the bot checks again every 10 minutes (`RETRY_MINUTES`) for up to 2 hours (`RETRY_HOURS`). |
-| Gave up | If a result is still missing after that, the bot posts a short notice and logs it. The next run of that game stores the draw and checks your tickets for it, but message 1 only shows the newest draw. |
+| Gave up | If a result is still missing after that, the bot posts a short notice and logs it. The next run stores the draw and checks your tickets for it, but message 1 only shows the newest draw. |
 | No draw today | Nothing is posted; the activity log gets a row. |
 | Restart | If the container starts inside the retry window (say the NAS rebooted at 8pm on a draw day), it runs straight away instead of waiting for the next day. |
-| No double posts | `Data/state.json` remembers the newest draw posted for each game, so the scheduler never posts the same draw twice, even after a restart. If only some of the three messages went out (Telegram failed half way), the next run sends just the missing ones. A manual `run` posts again on purpose. |
+| No double posts | `Data/state.json` remembers the newest draw posted, so the scheduler never posts the same draw twice, even after a restart. If only the first message went out (Telegram failed half way), the next run sends just the missing one. A manual `run` posts again on purpose. |
 
 The schedule always uses Singapore time, whatever the NAS time zone is.
 
@@ -353,9 +369,9 @@ version.
 
 | Command | What it does |
 | --- | --- |
-| `run` | One full run now: fetch new draws, analyse, backtest, suggest, check tickets, write the vault and post the three messages. A manual run posts even if the newest draw was posted before. |
+| `run` | One full run now: fetch new draws, check tickets, work out the next draw and the next big prize, write the vault and post the two messages. A manual run posts even if the newest draw was posted before. |
 | `serve` | The scheduler and the container's default command: runs at `RUN_AT` on draw days and retries until the results are out. It only posts draws that were not posted yet. |
-| `fetch` | Only update the CSV files and the next draw information. No analysis, notes or posting. |
+| `fetch` | Only update `toto.csv` and the next draw information. No analysis, notes or posting. |
 | `report` | Print the full report from the stored data. Nothing is fetched, posted or written to the notes. |
 | `check-site` | Read every Singapore Pools page the bot uses and print a PASS or FAIL line for each. Saves nothing. |
 | `demo` | The whole pipeline on synthetic data in a separate demo vault (`./demo-vault` unless you pass `--vault`). No network, never posts. |
@@ -365,7 +381,6 @@ Every command accepts these options (after the command name):
 
 | Option | Meaning |
 | --- | --- |
-| `--game toto`, `--game 4d`, `--game both` | Which game to fetch and report. Default both. |
 | `--dry-run` | Print the Telegram messages instead of posting them. `DRY_RUN=1` does the same, for `run` and `serve`. |
 | `--no-fetch` | Use only the stored data and do not contact the site (for `run`; `serve` and `fetch` refuse it). |
 | `--no-post` | Do not post or print the Telegram messages. |
@@ -374,7 +389,7 @@ Every command accepts these options (after the command name):
 Examples:
 
 ```bash
-python -m huatbot run --game toto --dry-run     # TOTO only, print the messages
+python -m huatbot run --dry-run                 # print the messages instead of posting
 python -m huatbot run --no-fetch --no-post      # rebuild notes from stored data, post nothing
 python -m huatbot report > report.md            # the full report as a file
 ```
@@ -390,16 +405,13 @@ default, and the problem is listed in the report.
 
 | Property | Default | Allowed | What it does |
 | --- | --- | --- | --- |
-| `toto_budget` | 10 | 0 to 100,000 | Most to spend on TOTO per draw. Suggestions never cost more. |
-| `fourd_budget` | 5 | 0 to 100,000 | Most to spend on 4D per draw. Suggestions never cost more. |
-| `jackpot_alert` | 3,000,000 | 0 or more | A TOTO jackpot estimate at or above this makes the buy signal HIGH. |
-| `alert_on_special_draws` | true | true or false | Any cascade, Hongbao or special TOTO draw also makes the buy signal HIGH. |
-| `toto_start_draw` | 2995 | 2995 to 99999 | First TOTO draw kept in the history (2995 is the first 6 from 49 draw). |
-| `fourd_history_draws` | 1,000 | 10 to 10,000 | How many of the latest 4D draws to keep and analyse. |
-| `backtest_draws` | 300 | 10 to 2,000 | How many recent draws each backtest replays. |
-| `random_sets_per_draw` | 1,000 | 10 to 20,000 | Random players each backtest compares against. More is steadier but slower. |
-| `offer_system7` | true | true or false | Include a System 7 option when the budget allows. |
-| `draw_notes_backfill` | 50 | 0 to 5,000 | How many recent draws of each game get their own note the first time the vault is filled. |
+| `jackpot_alert` | 3,000,000 | 0 or more | A jackpot estimate at or above this makes the buy signal HIGH. |
+| `alert_on_special_draws` | true | true or false | Any cascade, Hongbao or special draw also makes the buy signal HIGH. |
+| `toto_start_draw` | 2995 | 2995 to 99999 | First draw kept in the history (2995 is the first 6 from 49 draw). |
+| `draw_notes_backfill` | 50 | 0 to 5,000 | How many recent draws get their own note the first time the vault is filled. |
+
+Settings from the earlier version (budgets, 4D, backtests, System 7) are no longer used. If they are
+still in your `Settings.md`, the report lists them once so you can delete them; they do no harm.
 
 ### In .env: environment variables
 
@@ -428,33 +440,42 @@ the old values. Outside Docker the bot reads `.env` from the folder you run it i
 | `ENV_FILE` | `.env` | Outside Docker only: the file the bot reads settings like the Telegram token from. |
 | `TZ` | `Asia/Singapore` | Time zone for log timestamps. Set by compose. |
 
-## How the numbers are worked out
+## How the figures are worked out
 
-### Crowd score: which numbers other people buy
+### Boards sold per draw
 
-Picking unpopular numbers does not make you more likely to win, but when you do win you share the
-prize with fewer people. The crowd score estimates which numbers are popular, using only published
-results:
+The result pages do not show sales, but they can be worked out. Group 3 gets 5.5% of the prize pool,
+and the result page shows the Group 3 share amount and how many shares won. Share amount times
+winning shares, divided by 5.5%, gives the prize pool; the pool divided by 54% gives the number of
+boards sold. When Group 3 had no winner, holds money carried over from the draw before, or a cascade
+landed there, Group 4 (3%) is used instead. Draws where neither is clean are left out.
 
-1. **Sales for the draw.** Group 3 gets 5.5% of the prize pool, and the result page shows the Group 3
-   share amount and how many shares won. Share amount times winning shares, divided by 5.5%, gives the
-   prize pool; the pool divided by 54% gives the number of boards sold. When Group 3 had no winner, or
-   holds money carried over from the draw before, or a cascade landed there, Group 4 (3%) is used
-   instead. Draws where neither is clean are left out.
-2. **Expected Group 7 winners.** With that many boards, pure chance gives boards times 229,600 divided
-   by 13,983,816 Group 7 winners (229,600 of the 13,983,816 possible boards match exactly three numbers).
-3. **Crowd ratio.** Actual Group 7 winners divided by expected. Above 1 means the drawn numbers were
-   popular that night; below 1 means few people had them.
-4. **Score per number.** A ridge regression over hundreds of draws works out how much each of the 49
-   numbers pushes the crowd ratio up or down. A positive score means crowded, negative means quiet.
+Bigger jackpots sell more boards. For a jackpot the bot uses the median sales of past draws with a
+jackpot close to it (within 25%), or a fitted line of sales against jackpot when there are too few.
 
-As a check, the average crowd ratio over all draws should be close to 1. If it is not (for example
-because the prize pool percentages changed), the report says so plainly.
+### What the next draws will do
+
+The jackpot snowballs: when nobody wins Group 1, the whole prize rolls into the next draw and 38% of
+that draw's prize pool is added. After three draws in a row with no winner, the fourth is the
+cascade draw: if nobody wins that one either, the jackpot goes to the Group 2 winners.
+
+For each draw from the next one up to the cascade draw, the bot works out:
+
+| Figure | How |
+| --- | --- |
+| Jackpot | The next draw page's estimate for the next draw; for later draws, the jackpot before plus 38% of 54% of the boards that jackpot usually sells, rounded to the nearest $1,000. |
+| Won | The chance at least one board in the whole draw matches all six numbers: 1 minus e to the power of minus (boards sold divided by 13,983,816). This treats every board as a random pick, so it is a fair estimate rather than an exact figure. |
+| Unwon | The chance nobody has won the jackpot before that draw: the Won chances of the draws before it, multiplied out. |
+| Return per $1 | As in the buy signal below, at that jackpot. |
+
+The next big prize is the biggest jackpot on that path, usually the cascade draw. A Hongbao or special
+draw has its own advertised jackpot, so it is shown as a single draw, and draws announced on the next
+draw page are listed too. When the next draw page cannot be read, the next jackpot is worked out from
+the stored results the same way, and the report says so.
 
 ### Buy signal
 
-1. **Boards sold at this jackpot.** The median sales of past draws with a jackpot close to the next
-   one (within 25%), or a fitted line of sales against jackpot when there are too few such draws.
+1. **Boards sold at this jackpot**, as above.
 2. **Return per $1.** The average amount each $1 board brings back: Group 1 allowing for the chance of
    sharing it with other winners at that level of sales, Groups 2 to 4 (shares of the pool, also split
    between winners), the fixed Groups 5 to 7 ($50, $25, $10, worth about $0.24 per $1 together), and on
@@ -466,59 +487,18 @@ because the prize pool percentages changed), the report says so plainly.
 The return per $1 is usually well below $1. HIGH means a better than usual draw to play if you were
 going to play anyway, not a good investment.
 
-### Suggestions
+### Jackpot history
 
-| TOTO strategy | How the set is chosen |
-| --- | --- |
-| Hot | The 6 most frequent numbers in the last 50 draws. |
-| Overdue | The 6 numbers with the longest gaps since they were last drawn. |
-| Balanced | A random set with the usual odd and even split, low (1 to 24) and high split, and a total in the middle half of past totals. |
-| Low Crowd | A balanced set built from the 24 numbers with the lowest crowd scores, with no obvious pattern: no runs of three in a row, not all birthday numbers (at least two above 31), at most one number from the last draw, not evenly spaced, at most three sharing a last digit. |
-
-Sets are bought in the order Low Crowd, Balanced, Hot, Overdue while the budget allows, then a
-System 7 (7 boards, $7) built from the Low Crowd set and the least crowded number that keeps it
-pattern free, if there is room. The Low Crowd set is then not bought on its own as well, because it
-is already one of the System 7's boards. When there is not room for both, the plan shows the System 7
-as an alternative.
-
-| 4D pick | How the number is chosen | Bet type |
-| --- | --- | --- |
-| Hot Digits | The most frequent digit in each position over the last 100 draws. | Big |
-| Repeat Winner | The number that has won most often (the most recent one on a tie). | Big |
-| Digit Set | The most frequent set of four digits, ignoring order. | iBet Big |
-| Cold Digits | The least frequent digit in each position over the last 100 draws. | Big |
-| Random | A random number. | Big |
-
-The 4D budget is shared equally between the five picks in whole dollars (at least $1 each); with less
-than $5, only the first picks that fit are bought.
-
-### Backtest
-
-For each of the last 300 draws (`backtest_draws`), the bot rebuilds every strategy's picks using
-**only the draws before it**, then scores them against the real result with the prize amounts actually
-paid that night. Alongside, 1,000 random players (`random_sets_per_draw`) each play one random set per
-draw. At the end each strategy's total winnings are ranked among the random players:
-
-| Where it lands | Verdict |
-| --- | --- |
-| between the 5th and 95th percentile | No better than random (beat X% of random players, tied with Y%) |
-| above the 95th | Beat random in this sample, not expected to last |
-| below the 5th | Worse than random in this sample |
-
-The percentile is a mid rank: random players with a lower total count fully and players with the
-same total count half. Lottery totals tie a lot (many random players win nothing at all), so the
-verdict gives the players a strategy really beat and the players it tied with separately.
-
-The 4D backtest does the same with the five 4D picks against random Big $1 numbers. The scoreboard
-shows cost, winnings and return per $1 for every strategy and the average random player; every
-figure in the Random row is the average over the random players.
+From every stored draw: the share of draws where Group 1 was won, how many draws a jackpot lasted on
+average (until it was won or cascaded), how many cascaded, the typical Group 1 prize when it was won,
+the last time it was won and the five biggest jackpots.
 
 ## Optional Claude commentary
 
-The bot can add two or three sentences of plain commentary to the third message. Python computes every
+The bot can add two or three sentences of plain commentary to the second message. Python computes every
 figure first; Claude Code (`claude -p`) only receives those figures as JSON and is asked for at most 60
-words, with no new numbers. A reply that contains any number not in the figures is thrown away, and if
-anything fails the messages go out without commentary.
+words, with no new numbers and never a number to pick. A reply that contains any number not in the
+figures is thrown away, and if anything fails the messages go out without commentary.
 
 1. In `.env`, set `INSTALL_CLAUDE=true`, `COMMENTARY=claude` and `ANTHROPIC_API_KEY=...`.
 2. Rebuild: `docker compose up -d --build` (or redeploy the project in the Docker app).
@@ -557,6 +537,18 @@ sudo docker compose up -d --build
 
 With the Docker app, replace the project files with the new version, then rebuild or redeploy the
 project. Your data stays in the vault, so nothing is lost.
+
+## Upgrading from the 4D and suggestions version
+
+Earlier versions also followed 4D and suggested numbers. This version follows TOTO only and never
+suggests numbers. After `git pull` and a rebuild:
+
+* Your TOTO history, tickets, ledger and settings carry on as they are.
+* Old 4D tickets already checked stay in the ledger and its totals. 4D tickets not checked yet are
+  marked as no longer tracked, and new 4D rows in `Tickets.md` are listed in `Ledger.md` as not read.
+* The bot no longer writes `Data/fourd.csv`, `Data/backtest_cache.json`, `Draws/4D` or `Suggestions`.
+  It leaves them alone, so delete them whenever you like.
+* Settings from the old version are listed once in the report so you can delete them.
 
 ## Development
 

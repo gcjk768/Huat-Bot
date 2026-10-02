@@ -1,4 +1,4 @@
-"""Polite HTTP fetching for the Singapore Pools pages.
+"""Polite HTTP fetching for the Singapore Pools TOTO pages.
 
 ``Fetcher`` sends a browser User Agent, keeps at most ``max_workers`` requests in
 flight, pauses after every request, retries transient failures with exponential
@@ -25,6 +25,7 @@ from typing import Any, Callable
 import requests
 
 from . import constants as C
+from .textfmt import plural
 
 log = logging.getLogger(__name__)
 
@@ -255,8 +256,7 @@ class Fetcher:
             self._sleep(delay)
 
         self._count("failures")
-        plural = "attempt" if attempts_allowed == 1 else "attempts"
-        raise FetchError(f"{reason} after {attempts_allowed} {plural}", url=url, status=status,
+        raise FetchError(f"{reason} after {plural(attempts_allowed, 'attempt')}", url=url, status=status,
                          attempts=attempts_allowed, detail=detail, transient=True)
 
     def _safe_get(self, url: str) -> str | FetchError:

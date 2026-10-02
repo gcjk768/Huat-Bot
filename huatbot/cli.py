@@ -2,8 +2,9 @@
 
 Commands:
 
-  run         fetch new draws, analyse, write the vault and post the 3 Telegram messages
-              (a manual run posts even when the newest draw was posted before)
+  run         fetch new draws, work out the next draw and the next big prize, check the
+              tickets, write the vault and post the 2 Telegram messages (a manual run posts
+              even when the newest draw was posted before)
   serve       run on the schedule: 7.30pm Singapore time on draw days, retrying until the
               results are out (this is what the Docker container runs)
   fetch       update the CSVs and the next draw info only
@@ -12,7 +13,7 @@ Commands:
   demo        the whole pipeline on synthetic data in a demo vault (no network, never posts)
   init-vault  create the bot folder with Settings.md and Tickets.md in the vault
 
-Options (after the command): --game toto|4d|both, --dry-run, --no-fetch, --no-post, --vault PATH.
+Options (after the command): --dry-run, --no-fetch, --no-post, --vault PATH.
 Environment: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, VAULT_PATH, VAULT_FOLDER, DATA_DIR, RUN_AT,
 RETRY_MINUTES, RETRY_HOURS, DRY_RUN (1 forces a dry run), COMMENTARY, CLAUDE_BIN, LOG_LEVEL
 (default INFO for serve, WARNING otherwise), TZ.
@@ -36,7 +37,7 @@ from . import __version__, runner, scheduler, telegram
 from . import fetch as site
 from .http import Fetcher
 from .models import RunResult
-from .store import load_fourd, load_toto
+from .store import load_toto
 from .textfmt import plural
 from .vault import SG, Vault
 
@@ -44,7 +45,6 @@ log = logging.getLogger(__name__)
 
 DEMO_VAULT = "demo-vault"
 TRUE_WORDS = ("1", "true", "yes", "on", "y")
-GAME_CHOICES = ("toto", "4d", "both")
 
 
 def make_fetcher() -> Fetcher:
@@ -72,8 +72,6 @@ def _setup_logging(command: str) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--game", type=str.lower, choices=GAME_CHOICES, default="both",
-                        help="which game to fetch and report (default both)")
     common.add_argument("--dry-run", action="store_true",
                         help="print the Telegram messages instead of posting them (DRY_RUN=1 does the same)")
     common.add_argument("--no-fetch", action="store_true", help="use only the stored data, do not contact the site")
@@ -83,15 +81,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser = argparse.ArgumentParser(
         prog="huatbot",
-        description="Huat Bot: Singapore Pools TOTO and 4D analyst. Everything is read from and written "
-                    "to an Obsidian vault.",
+        description="Huat Bot: Singapore Pools TOTO results, the next draw and the next big prize. "
+                    "Everything is read from and written to an Obsidian vault.",
     )
     parser.add_argument("--version", action="version", version=f"huatbot {__version__}")
     sub = parser.add_subparsers(dest="command", metavar="command")
     helps = {
-        "run": "fetch, analyse, write the vault and post the 3 messages now",
+        "run": "fetch, analyse, write the vault and post the 2 messages now",
         "serve": "run on the schedule (7.30pm Singapore time on draw days)",
-        "fetch": "update the CSVs and next draw info only",
+        "fetch": "update toto.csv and the next draw info only",
         "report": "print the full report from the stored data",
         "check-site": "check that every Singapore Pools page can still be read",
         "demo": "run everything on synthetic data in a demo vault",
@@ -106,15 +104,11 @@ def _vault(args: argparse.Namespace) -> Vault:
     return runner.resolve_vault(args.vault) if args.vault else Vault.from_env()
 
 
-def _games(args: argparse.Namespace) -> tuple[str, ...]:
-    return runner.normalise_games(args.game)
-
-
 def _print_summary(result: RunResult, out: Callable[[str], Any] = print) -> None:
     for w in result.warnings:
         out(f"Warning: {w}")
-    new = [f"{runner.LABELS[g]} {plural(len(v), 'draw')}" for g, v in result.new_draws.items() if v]
-    out(f"New draws: {', '.join(new)}." if new else "No new draws.")
+    new = len(result.new_draws)
+    out(f"New draws: {plural(new, 'TOTO draw')}." if new else "No new draws.")
     if result.report_path:
         out(f"Report: {result.report_path}")
     if result.posted:
@@ -131,7 +125,7 @@ def cmd_run(args: argparse.Namespace, dry_run: bool) -> int:
     vault = _vault(args)
     fetcher = None if args.no_fetch else make_fetcher()
     try:
-        result = runner.run(_games(args), dry_run=dry_run, fetch=not args.no_fetch, post=not args.no_post,
+        result = runner.run(dry_run=dry_run, fetch=not args.no_fetch, post=not args.no_post,
                             vault=vault, fetcher=fetcher, out=print, force_post=True)
     finally:
         if fetcher is not None and hasattr(fetcher, "close"):
@@ -141,10 +135,11 @@ def cmd_run(args: argparse.Namespace, dry_run: bool) -> int:
 
 
 def draw_done(vault: Vault, game: str, day: date, posting: bool) -> bool:
-    """True when the newest stored ``game`` draw is from ``day`` (or later) and, when posting is
-    on, it has been posted (``last_posted`` in state.json). The scheduler runs a game again
-    while this is False, so a result page that failed or a Telegram outage is retried."""
-    df = load_toto(vault.toto_csv) if game == "toto" else load_fourd(vault.fourd_csv)
+    """True when the newest stored TOTO draw is from ``day`` (or later) and, when posting is on,
+    it has been posted (``last_posted`` in state.json). The scheduler runs again while this is
+    False, so a result page that failed or a Telegram outage is retried. ``game`` is the
+    scheduler's game key ("toto")."""
+    df = load_toto(vault.toto_csv)
     if df.empty:
         return False
     newest = df.sort_values("draw_number").iloc[-1]
@@ -172,18 +167,17 @@ def cmd_serve(args: argparse.Namespace, dry_run: bool) -> int:
     quiet = dry_run or args.no_post
     # runner.run treats a missing token as a dry run, so nothing is posted then either.
     posting = not quiet and all(telegram.config_from_env())
-    games = _games(args)
 
-    def run_fn(games: tuple[str, ...]) -> RunResult:
-        return runner.run(games, dry_run=dry_run, fetch=True, post=not args.no_post, vault=vault,
+    def run_fn(games: tuple[str, ...] = ()) -> RunResult:
+        return runner.run(dry_run=dry_run, fetch=True, post=not args.no_post, vault=vault,
                           fetcher=fetcher, out=print, force_post=False)
 
     def check_fn(game: str):
-        # The date counts only once the result page is complete (TOTO winning shares table,
-        # all 23 4D numbers), so a page published in parts is waited for, not stored half done.
+        # The date counts only once the result page is complete (with the winning shares
+        # table), so a page published in parts is waited for, not stored half done.
         # strict: a site that cannot be reached raises, so the scheduler's notice says so
         # instead of blaming Singapore Pools for not publishing.
-        return site.latest_complete_date(fetcher, game, strict=True)
+        return site.latest_complete_date(fetcher, strict=True)
 
     def refresh_fn() -> dict:
         return runner.refresh_next_draws(vault, fetcher)
@@ -196,11 +190,10 @@ def cmd_serve(args: argparse.Namespace, dry_run: bool) -> int:
 
     for w in config.warnings:
         print(f"Warning: {w}")
-    only = "" if set(games) == set(runner.GAMES) else f" Only {' and '.join(runner.LABELS[g] for g in games)} is followed."
-    print(f"Huat Bot scheduler started. {config.describe()}.{only} Vault folder: {vault.base}")
+    print(f"Huat Bot scheduler started. {config.describe()}. Vault folder: {vault.base}")
     try:
         scheduler.serve(run_fn, check_fn, refresh_fn, notify_fn, vault.log,
-                        lambda: datetime.now(SG), time.sleep, config, done_fn=done_fn, games=games)
+                        lambda: datetime.now(SG), time.sleep, config, done_fn=done_fn)
     except KeyboardInterrupt:
         print("Scheduler stopped.")
     finally:
@@ -216,23 +209,23 @@ def cmd_fetch(args: argparse.Namespace, dry_run: bool) -> int:
     vault = _vault(args)
     fetcher = make_fetcher()
     try:
-        result = runner.fetch_data(_games(args), vault=vault, fetcher=fetcher)
+        result = runner.fetch_data(vault=vault, fetcher=fetcher)
     finally:
         if hasattr(fetcher, "close"):
             fetcher.close()
     for w in result.warnings:
         print(f"Warning: {w}")
-    new = [f"{runner.LABELS[g]} {plural(len(v), 'new draw')}" for g, v in result.new_draws.items()]
-    print(", ".join(new) + "." if new else "No game was updated.")
+    print(f"TOTO: {plural(len(result.new_draws), 'new draw')}." if result.ok or result.new_draws
+          else "TOTO could not be updated.")
     print(f"Data folder: {vault.data_dir}")
     return 0 if result.ok else 1
 
 
 def cmd_report(args: argparse.Namespace, dry_run: bool) -> int:
     vault = _vault(args)
-    text = runner.build_report(vault, games=_games(args))
+    text = runner.build_report(vault)
     if text is None:
-        print(f"No TOTO and 4D data is stored in {vault.data_dir} yet. Run the fetch command first.",
+        print(f"No TOTO data is stored in {vault.data_dir} yet. Run the fetch command first.",
               file=sys.stderr)
         return 1
     print(text)
@@ -253,7 +246,7 @@ def cmd_demo(args: argparse.Namespace, dry_run: bool) -> int:
     path = args.vault or DEMO_VAULT
     print(f"Demo run with synthetic data in the vault at {path}. Nothing is fetched and nothing is posted.")
     print()
-    result = runner.run(_games(args), demo=True, vault=path, out=print)
+    result = runner.run(demo=True, vault=path, out=print)
     _print_summary(result)
     return 0 if result.ok else 1
 
@@ -265,7 +258,7 @@ def cmd_init_vault(args: argparse.Namespace, dry_run: bool) -> int:
         vault.log(runner.EV_NOTE, f"Created [[{rel.rsplit('/', 1)[-1].removesuffix('.md')}]] (starter note)")
         print(f"Created {vault.path(rel)}")
     print(f"The bot folder is ready at {vault.base}" + ("" if created else " (nothing new was needed)") + ".")
-    print("Edit Settings.md for your budgets and add your tickets to Tickets.md in Obsidian.")
+    print("Edit Settings.md for your jackpot alert and add your TOTO tickets to Tickets.md in Obsidian.")
     return 0
 
 

@@ -1,10 +1,10 @@
-"""Pure parsers for Singapore Pools pages (HTML string in, plain Python values out).
+"""Pure parsers for the Singapore Pools TOTO pages (HTML string in, plain Python values out).
 
 Result pages are read with the CSS classes the user verified on the live site, so the
 parsers do not depend on where things sit on the page. The next draw and prize
 structure pages are read from their visible text, because their markup is loose and
-the online2 prize pages may be drawn by JavaScript (then the figures are simply not
-in the HTML and the prize parsers return None).
+the online2 prize page may be drawn by JavaScript (then the figures are simply not
+in the HTML and the prize parser returns None).
 """
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ import base64
 import binascii
 import math
 import re
+from collections.abc import Callable
 from datetime import date, datetime, time
 from urllib.parse import parse_qs, unquote
 from zoneinfo import ZoneInfo
@@ -45,16 +46,17 @@ def _cell_text(tag) -> str:
     return _clean(tag.get_text(" ")) if tag is not None else ""
 
 
-def page_text(html: str) -> str:
-    """Visible text of a page: scripts, styles and templates removed, whitespace collapsed."""
+def _visible_soup(html: str) -> BeautifulSoup:
+    """The page with everything a reader never sees (scripts, styles, templates, head) removed."""
     soup = _soup(html)
     for tag in soup(["script", "style", "noscript", "template", "head"]):
         tag.decompose()
-    return _clean(soup.get_text(" "))
+    return soup
 
 
-def _first(soup: BeautifulSoup, selector: str):
-    return soup.select_one(selector)
+def page_text(html: str) -> str:
+    """Visible text of a page: scripts, styles and templates removed, whitespace collapsed."""
+    return _clean(_visible_soup(html).get_text(" "))
 
 
 # draw numbers and the sppl query value
@@ -105,7 +107,6 @@ _MONTHS = {
     "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
 }
 _MONTH_WORD = r"(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\.?"
-_WEEKDAY_WORD = r"(?:Mon|Tue|Tues|Wed|Thu|Thur|Thurs|Fri|Sat|Sun)[a-z]*\.?,?"
 
 # "Thu, 01 Oct 2026", "1 October 2026", "01-Oct-2026", "1st Oct 2026"
 _DMY_NAMED = re.compile(rf"\b(\d{{1,2}})(?:st|nd|rd|th)?[\s\-/.,]*{_MONTH_WORD}[\s\-/.,]*(\d{{4}})\b", re.I)
@@ -160,10 +161,7 @@ def parse_money(text: str | None) -> float | None:
         return None
     if isinstance(text, (int, float)):
         return None if (isinstance(text, float) and math.isnan(text)) else float(text)
-    s = _clean(text)
-    if not s or set(s) <= set("-–—$ "):
-        return None
-    m = _AMOUNT.search(s)
+    m = _AMOUNT.search(_clean(text))  # "-", "$" or words have no digit, so no match
     if not m:
         return None
     value = float(m.group(1).replace(",", ""))
@@ -221,11 +219,11 @@ def parse_draw_list(html: str) -> list[tuple[int, date | None]]:
 
 
 def _draw_header(soup: BeautifulSoup) -> tuple[int, date]:
-    num_tag = _first(soup, "th.drawNumber") or _first(soup, ".drawNumber")
+    num_tag = soup.select_one("th.drawNumber") or soup.select_one(".drawNumber")
     number = _draw_number_from_text(_cell_text(num_tag)) if num_tag is not None else None
     if number is None:
         raise ParseError("draw number not found on the page")
-    date_tag = _first(soup, "th.drawDate") or _first(soup, ".drawDate")
+    date_tag = soup.select_one("th.drawDate") or soup.select_one(".drawDate")
     if date_tag is None:
         raise ParseError(f"draw date not found on the page for draw {number}")
     return number, parse_draw_date(_cell_text(date_tag))
@@ -238,12 +236,12 @@ def parse_toto_result(html: str) -> dict:
 
     numbers = []
     for k in range(1, 7):
-        tag = _first(soup, f"td.win{k}")
+        tag = soup.select_one(f"td.win{k}")
         text = _cell_text(tag)
         if tag is None or not re.search(r"\d", text):
             raise ParseError(f"winning number {k} not found for draw {draw_number}")
         numbers.append(parse_int(text))
-    add_tag = _first(soup, "td.additional")
+    add_tag = soup.select_one("td.additional")
     if add_tag is None or not re.search(r"\d", _cell_text(add_tag)):
         raise ParseError(f"additional number not found for draw {draw_number}")
     additional = parse_int(_cell_text(add_tag))
@@ -254,7 +252,7 @@ def parse_toto_result(html: str) -> dict:
     if not 1 <= additional <= C.TOTO_MAX_NUMBER or additional in numbers:
         raise ParseError(f"additional number for draw {draw_number} looks wrong: {additional}")
 
-    jackpot = parse_money(_cell_text(_first(soup, "td.jackpotPrize")))
+    jackpot = parse_money(_cell_text(soup.select_one("td.jackpotPrize")))
     out: dict = {
         "draw_number": draw_number,
         "draw_date": draw_date,
@@ -266,7 +264,7 @@ def parse_toto_result(html: str) -> dict:
         out[f"g{g}_share"] = float("nan")
         out[f"g{g}_winners"] = 0
 
-    table = _first(soup, "table.tableWinningShares")
+    table = soup.select_one("table.tableWinningShares")
     groups_read: set[int] = set()
     if table is not None:
         for tr in table.find_all("tr"):
@@ -290,69 +288,7 @@ def parse_toto_result(html: str) -> dict:
     return out
 
 
-_FOURD_PLACEHOLDER = re.compile(r"[-\u2013\u2014]+")  # "-", "----" and long dash variants
-
-
-def _fourd_number(text: str, what: str = "4D number") -> str:
-    """A 4D cell as a 4 character string; "" for an empty cell or a dash placeholder.
-
-    Raises ParseError for anything else (text, or more than 4 digits), so a changed layout is
-    not stored as wrong numbers.
-    """
-    s = re.sub(r"\s+", "", text or "")
-    if not s or _FOURD_PLACEHOLDER.fullmatch(s):
-        return ""
-    if not s.isdigit() or len(s) > 4:
-        raise ParseError(f"{what} {s!r} is not a 4 digit number")
-    return s.zfill(4)
-
-
-def _fourd_prize_list(body, label: str, draw_number: int) -> list[str]:
-    """The 10 starter or consolation numbers of a 4D page, in page order.
-
-    Cells holding a number or a dash placeholder count (a placeholder stays a blank in its
-    place); label cells are skipped, and empty spacer cells too when there are more than 10
-    cells. Anything other than exactly 10 cells, or 10 with no number at all, raises.
-    """
-    if body is None:
-        raise ParseError(f"{label} numbers not found for 4D draw {draw_number}")
-    items: list[tuple[str, bool]] = []  # (value, empty cell)
-    for td in body.find_all("td"):
-        s = re.sub(r"\s+", "", _cell_text(td))
-        if not s:
-            items.append(("", True))
-        elif _FOURD_PLACEHOLDER.fullmatch(s):
-            items.append(("", False))
-        elif s.isdigit():
-            items.append((_fourd_number(s, f"{label} number"), False))
-        # any other text is a label or heading cell
-    if len(items) > 10:
-        items = [item for item in items if not item[1]]  # drop empty spacer cells
-    values = [v for v, _ in items]
-    if len(values) != 10 or not any(values):
-        found = sum(1 for v in values if v)
-        raise ParseError(f"{found} {label} numbers were read for 4D draw {draw_number} "
-                         f"({len(values)} cells), expected 10; the layout may have changed")
-    return values
-
-
-def parse_fourd_result(html: str) -> dict:
-    """One 4D result page -> dict with the fourd.csv number columns (4 character strings)."""
-    soup = _soup(html)
-    draw_number, draw_date = _draw_header(soup)
-    out: dict = {"draw_number": draw_number, "draw_date": draw_date}
-    for key, cls in (("first", "tdFirstPrize"), ("second", "tdSecondPrize"), ("third", "tdThirdPrize")):
-        out[key] = _fourd_number(_cell_text(_first(soup, f"td.{cls}")), f"4D {key} prize")
-    for key, cls in (("starter", "tbodyStarterPrizes"), ("consolation", "tbodyConsolationPrizes")):
-        values = _fourd_prize_list(_first(soup, f"tbody.{cls}"), key, draw_number)
-        for i, v in enumerate(values, start=1):
-            out[f"{key}_{i}"] = v
-    if not any(out[k] for k in out if k not in ("draw_number", "draw_date")):
-        raise ParseError(f"no winning numbers found for 4D draw {draw_number}")
-    return out
-
-
-# next draw pages
+# next draw page
 
 _TIME = re.compile(r"\b(\d{1,2})(?:\s*[.:]\s*(\d{2}))?\s*([ap])\.?\s*m\b\.?", re.I)
 
@@ -420,13 +356,7 @@ def parse_toto_next_draw(html: str) -> dict:
     }
 
 
-def parse_fourd_next_draw(html: str) -> dict:
-    """Next 4D draw: {draw_datetime, raw_text}."""
-    text = page_text(html)
-    return {"draw_datetime": _next_draw_datetime(text), "raw_text": text}
-
-
-# prize structure pages (online2, possibly drawn by JavaScript)
+# prize structure page (online2, possibly drawn by JavaScript)
 
 _GROUP_LABEL = re.compile(r"\bGroup\s*([1-7])\b", re.I)
 _PERCENT = re.compile(r"(\d+(?:\.\d+)?)\s*%")
@@ -471,12 +401,21 @@ def _group_pct(text: str, strict: bool) -> float | None:
     return None
 
 
+def _strict_group_pct(text: str) -> float | None:
+    return _group_pct(text, strict=True)
+
+
 def _group_fixed(text: str) -> float | None:
     m = _DOLLAR.search(text)
     if not m or "%" in text[: m.start()]:
         return None
     value = parse_money(m.group(0))
     return float(value) if value is not None and 0 < value < 10_000 else None
+
+
+def _first_value(texts: list[str], read: Callable[[str], float | None]) -> float | None:
+    """The first value ``read`` finds in ``texts``, or None."""
+    return next((v for v in map(read, texts) if v is not None), None)
 
 
 def parse_toto_prize_structure(html: str) -> dict | None:
@@ -487,9 +426,7 @@ def parse_toto_prize_structure(html: str) -> dict | None:
     Table rows that start with a "Group N" cell are read first; loose page text near each
     group label fills any group the tables did not give.
     """
-    soup = _soup(html)
-    for tag in soup(["script", "style", "noscript", "template", "head"]):
-        tag.decompose()
+    soup = _visible_soup(html)
     text = _clean(soup.get_text(" "))
     if not text:
         return None
@@ -516,24 +453,16 @@ def parse_toto_prize_structure(html: str) -> dict | None:
             if value is not None:
                 fixed[g] = value
 
+    # Loose text near each group label fills what the tables did not give.
     segments = _group_segments(text)
-    for g in (1, 2, 3, 4):
-        for seg in segments.get(g, []) if g not in pct else []:
-            value = _group_pct(seg, strict=True)
+    for g in range(1, 8):
+        found, read = (pct, _strict_group_pct) if g <= 4 else (fixed, _group_fixed)
+        if g not in found:
+            value = _first_value(segments.get(g, []), read)
             if value is not None:
-                pct[g] = value
-                break
-    for g in (5, 6, 7):
-        for seg in segments.get(g, []) if g not in fixed else []:
-            value = _group_fixed(seg)
-            if value is not None:
-                fixed[g] = value
-                break
+                found[g] = value
     if min_g1 is None:
-        for seg in segments.get(1, []):
-            min_g1 = _min_group1(_MINIMUM.search(seg))
-            if min_g1 is not None:
-                break
+        min_g1 = _first_value(segments.get(1, []), lambda seg: _min_group1(_MINIMUM.search(seg)))
 
     if len(pct) < 4 or sum(pct.values()) >= 1 or pct[1] <= max(pct[2], pct[3], pct[4]):
         return None  # incomplete or implausible (Group 1 always takes the largest share)
@@ -548,159 +477,3 @@ def parse_toto_prize_structure(html: str) -> dict | None:
         share = round(float(m.group(1)) / 100, 6)
 
     return {"pool_share_of_sales": share, "group_pool_pct": pct, "fixed_prizes": fixed, "min_group1": min_g1}
-
-
-_TIER_PATTERNS = (
-    ("first", re.compile(r"\b(?:1st|first)\b", re.I)),
-    ("second", re.compile(r"\b(?:2nd|second)\b", re.I)),
-    ("third", re.compile(r"\b(?:3rd|third)\b", re.I)),
-    ("starter", re.compile(r"\bstarter", re.I)),
-    ("consolation", re.compile(r"\bconsolation", re.I)),
-)
-_BIG_TIERS = ("first", "second", "third", "starter", "consolation")
-_SMALL_TIERS = ("first", "second", "third")
-_PERMS = (24, 12, 6, 4)
-
-
-def _tier_of(label: str) -> str | None:
-    for tier, pattern in _TIER_PATTERNS:
-        if pattern.search(label):
-            return tier
-    return None
-
-
-def _bet_of(text: str) -> str | None:
-    """"big" or "small" if the text names exactly one of them (last mention wins)."""
-    hits = re.findall(r"\b(big|small)\b", text or "", re.I)
-    return hits[-1].lower() if hits else None
-
-
-def _perm_of(header: str) -> int | None:
-    header = re.sub(r"\$\s*[\d,.]+", " ", header)  # "($1 bet)" is not a permutation count
-    m = re.search(r"\b(24|12|6|4)\b", header)
-    if not m:
-        return None
-    low = header.lower()
-    if "perm" in low or "ibet" in low or header.strip() == m.group(1):
-        return int(m.group(1))
-    return None
-
-
-def _complete(table: dict[str, float], tiers: tuple[str, ...]) -> bool:
-    """All tiers present and amounts strictly falling from 1st prize down."""
-    if not all(t in table for t in tiers):
-        return False
-    values = [table[t] for t in tiers]
-    return all(v > 0 for v in values) and all(a > b for a, b in zip(values, values[1:]))
-
-
-def _fourd_tables(soup: BeautifulSoup) -> tuple[dict, dict, dict]:
-    """Read Big, Small and iBet amounts from <table> elements."""
-    straight: dict[str, dict[str, float]] = {"big": {}, "small": {}}
-    ibet: dict[str, dict[int, dict[str, float]]] = {"big": {}, "small": {}}
-    for table in soup.find_all("table"):
-        rows = [[_cell_text(c) for c in tr.find_all(["td", "th"])] for tr in table.find_all("tr")]
-        rows = [r for r in rows if r]
-        if not rows:
-            continue
-        # Context: caption, else the nearest text before the table that names Big or Small.
-        caption = table.find("caption")
-        context = _cell_text(caption) if caption is not None else ""
-        if not _bet_of(context):
-            prev = table.find_previous(string=re.compile(r"\b(big|small)\b", re.I))
-            context = _clean(str(prev)) if prev else ""
-        context_bet = _bet_of(context)
-        context_ibet = "ibet" in context.lower()
-
-        # Column meaning from the header rows (rows whose first cell is not a prize tier).
-        col_bet: dict[int, str] = {}
-        col_perm: dict[int, int] = {}
-        for row in rows:
-            if _tier_of(row[0]):
-                continue
-            for i, cell in enumerate(row):
-                if i == 0:
-                    continue
-                bet = _bet_of(cell)
-                if bet:
-                    col_bet[i] = bet
-                perm = _perm_of(cell)
-                if perm:
-                    col_perm[i] = perm
-            if "ibet" in " ".join(row).lower():
-                context_ibet = True
-            if not context_bet:
-                context_bet = _bet_of(" ".join(row))
-
-        for row in rows:
-            tier = _tier_of(row[0]) if row else None
-            if tier is None:
-                continue
-            money_cells = {i: parse_money(c) for i, c in enumerate(row) if i > 0 and "$" in c}
-            money_cells = {i: v for i, v in money_cells.items() if v is not None}
-            if not money_cells:
-                continue
-            if col_perm and context_bet:
-                for i, v in money_cells.items():
-                    if i in col_perm:
-                        ibet[context_bet].setdefault(col_perm[i], {})[tier] = v
-            elif col_bet:
-                for i, v in money_cells.items():
-                    if i in col_bet:
-                        straight[col_bet[i]].setdefault(tier, v)
-            elif context_bet and not context_ibet:
-                straight[context_bet].setdefault(tier, list(money_cells.values())[-1])
-    return straight["big"], straight["small"], ibet
-
-
-_TIER_AMOUNT = re.compile(
-    r"\b(1st|first|2nd|second|3rd|third|starter|consolation)\b[^$]{0,60}?(\$\s*\d[\d,]*(?:\.\d+)?)", re.I
-)
-
-
-def _fourd_text(text: str) -> tuple[dict, dict]:
-    """Fallback: tier amounts from running text, each assigned to the last Big/Small label before it."""
-    labels = [(m.start(), m.group(1).lower(), bool(m.group(0).lower().startswith("ibet")))
-              for m in re.finditer(r"(?:\biBet\s+)?\b(big|small)\b", text, re.I)]
-    out: dict[str, dict[str, float]] = {"big": {}, "small": {}}
-    for m in _TIER_AMOUNT.finditer(text):
-        before = [lab for lab in labels if lab[0] < m.start()]
-        if not before or before[-1][2]:
-            continue  # no label yet, or inside an iBet section
-        tier = _tier_of(m.group(1))
-        value = parse_money(m.group(2))
-        if tier and value is not None:
-            out[before[-1][1]].setdefault(tier, value)
-    return out["big"], out["small"]
-
-
-def parse_fourd_prize_structure(html: str) -> dict | None:
-    """Big and Small prize per $1 from the official 4D prize structure page, or None if not in the HTML.
-
-    Returns {"big": {tier: amount}, "small": {tier: amount}} and, when the page lists them,
-    "ibet": {"big": {24: {tier: amount}, 12: ..., 6: ..., 4: ...}, "small": {...}}.
-    """
-    soup = _soup(html)
-    for tag in soup(["script", "style", "noscript", "template"]):
-        tag.decompose()
-    big, small, ibet = _fourd_tables(soup)
-    if not (_complete(big, _BIG_TIERS) and _complete(small, _SMALL_TIERS)):
-        tbig, tsmall = _fourd_text(page_text(str(soup)))
-        if not _complete(big, _BIG_TIERS):
-            big = tbig
-        if not _complete(small, _SMALL_TIERS):
-            small = tsmall
-    if not (_complete(big, _BIG_TIERS) and _complete(small, _SMALL_TIERS)):
-        return None
-    out: dict = {
-        "big": {t: float(big[t]) for t in _BIG_TIERS},
-        "small": {t: float(small[t]) for t in _SMALL_TIERS},
-    }
-    ibet_clean: dict[str, dict[int, dict[str, float]]] = {}
-    for bet, tiers in (("big", _BIG_TIERS), ("small", _SMALL_TIERS)):
-        for perm, table in sorted(ibet.get(bet, {}).items(), reverse=True):
-            if _complete(table, tiers):
-                ibet_clean.setdefault(bet, {})[perm] = {t: float(table[t]) for t in tiers}
-    if ibet_clean:
-        out["ibet"] = ibet_clean
-    return out
