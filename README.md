@@ -315,8 +315,14 @@ A ticket row looks like this (copy the examples at the bottom of `Tickets.md`):
 
 Dates can be written `5 Oct 2026`, `Mon 5 Oct 2026` or `5/10/2026` (day first). TOTO bet types are
 Ordinary and System 7 to System 12; 4D bet types are Big, Small, iBet Big and iBet Small. A row the bot
-cannot read is listed in `Ledger.md` with the reason. A checked ticket stays in the ledger even if you
-delete its row later.
+cannot read is listed in `Ledger.md` with the reason.
+
+| You change a row | What the ledger does |
+| --- | --- |
+| Fix a typo in a ticket not checked yet | The old row is dropped from the totals and the corrected one is checked. |
+| Correct one field (numbers, bet type or cost) of a ticket already checked | The corrected ticket is checked again and replaces the old one, so it is counted once. |
+| Delete the row of a ticket not checked yet | It leaves the totals; put the row back and it returns. |
+| Delete the row of a ticket already checked | It stays in the ledger, so your spent and won history stays complete. |
 
 ## Schedule and retries
 

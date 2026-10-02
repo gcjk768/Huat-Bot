@@ -224,3 +224,19 @@ def test_signal_with_synthetic_next_draw(toto_df, next_toto, settings, rules):
     expected = B.toto_ev_per_dollar(next_toto.jackpot_estimate, boards, rules, next_toto.draw_type)
     assert sig.ev_breakdown == expected
     assert sig.label in ("HIGH", "MEDIUM", "LOW")
+
+
+def test_an_average_above_one_dollar_carries_a_caveat(toto_df, settings, rules):
+    # A cascade draw near $3.9M averages more than $1 back per $1, almost all of it from a prize
+    # nearly nobody wins: the reason must say so, in the same single sentence.
+    sig = B.buy_signal(nxt(3_900_000.0, "cascade"), toto_df, settings, rules)
+    assert sig.ev_per_dollar > 1
+    assert "almost every ticket still loses" in sig.reason
+    assert f"7 boards in {C.TOTO_COMBOS:,} can win" in sig.reason  # Group 1 plus the 6 Group 2 boards
+    assert "above your budget" in sig.reason
+    assert sig.reason.endswith(".") and not re.search(r"\.\s", sig.reason)  # one sentence
+    assert not DASHES.search(sig.reason)
+    # A normal draw at $2.1M averages well under $1: no caveat.
+    normal = B.buy_signal(nxt(2_100_000.0), toto_df, settings, rules)
+    assert normal.ev_per_dollar < 1
+    assert "almost every ticket still loses" not in normal.reason

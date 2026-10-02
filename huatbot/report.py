@@ -22,8 +22,9 @@ from __future__ import annotations
 
 import logging
 import math
+import re
 from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -43,6 +44,7 @@ from .textfmt import (
     fmt_date,
     fmt_datetime,
     fmt_num,
+    fmt_time,
     html_escape,
     md_table,
     money,
@@ -210,6 +212,7 @@ class NextDraw:
     when: datetime | None  # Singapore time
     from_schedule: bool = False  # True when the date was worked out from the regular draw days
     stale: bool = False  # True when stored results are behind: draws were held after the newest one
+    held: bool = False  # True when its draw time has passed but its result is not stored yet
 
     @property
     def when_text(self) -> str:
@@ -217,7 +220,11 @@ class NextDraw:
             return "not announced yet"
         text = fmt_datetime(self.when)
         if self.stale:
-            return f"{text} (worked out from the regular schedule, results are not up to date)"
+            if self.from_schedule:
+                return f"{text} (worked out from the regular schedule, results are not up to date)"
+            return f"{text} (results are not up to date)"
+        if self.held:
+            return f"{text} (draw held, result not out yet)"
         return f"{text} (regular schedule, not announced yet)" if self.from_schedule else text
 
 
@@ -241,6 +248,17 @@ def next_info_is_current(ctx: Context, game: str) -> bool:
     return (last_day is None or when.date() > last_day) and when.date() >= to_sg(ctx.now).date()
 
 
+def _draw_day_between(after: date, before: date, weekdays: Iterable[int]) -> bool:
+    """True when a day strictly between ``after`` and ``before`` falls on one of ``weekdays``."""
+    days = set(weekdays)
+    d = after + timedelta(days=1)
+    while d < before:
+        if d.weekday() in days:
+            return True
+        d += timedelta(days=1)
+    return False
+
+
 def next_draw(ctx: Context, game: str) -> NextDraw:
     """Number and date of the next draw of ``game`` ("toto" or "4d").
 
@@ -248,17 +266,25 @@ def next_draw(ctx: Context, game: str) -> NextDraw:
     otherwise it is the next regular draw day after the newest stored draw. When that day is
     already past (the stored results are behind, for example because the site could not be
     read), the next regular draw day from today is shown instead, marked ``stale``, with no
-    draw number (special draws in between cannot be counted). A draw later today still counts
-    as the next draw, since its result may simply not be out yet.
+    draw number (special draws in between cannot be counted). The page date is marked
+    ``stale`` the same way, keeping its date but not a number, when a regular draw day falls
+    between the newest stored draw and it (a draw was held but is not stored, for example
+    because this run did not fetch that game). A draw earlier today still counts as the next
+    draw, since its result may simply not be out yet, but it is marked ``held``: its sales
+    are closed, so it gets no buy signal and no suggestions.
     """
     last_no, last_day = _last_stored(ctx, game)
     number = last_no + 1 if last_no > 0 else None
     weekdays = C.TOTO_WEEKDAYS if game == "toto" else C.FOURD_WEEKDAYS
+    now = to_sg(ctx.now)
+    today = now.date()
 
     info = ctx.next_toto if game == "toto" else ctx.next_fourd
     when = to_sg(getattr(info, "draw_datetime", None))
     if when is not None and (last_day is None or when.date() > last_day):
         nd = NextDraw(game, number, when.date(), when, False)
+        if last_day is not None and nd.day >= today and _draw_day_between(last_day, nd.day, weekdays):
+            return replace(nd, number=None, stale=True)
     elif last_day is None:
         return NextDraw(game, number, None, None, False)
     else:
@@ -266,9 +292,8 @@ def next_draw(ctx: Context, game: str) -> NextDraw:
         while d.weekday() not in weekdays:
             d += timedelta(days=1)
         nd = NextDraw(game, number, d, datetime.combine(d, C.DRAW_TIME, tzinfo=SG), True)
-    today = to_sg(ctx.now).date()
     if nd.day is None or nd.day >= today:
-        return nd
+        return replace(nd, held=True) if nd.when is not None and nd.when < now else nd
     d = today
     while d.weekday() not in weekdays:
         d += timedelta(days=1)
@@ -323,10 +348,11 @@ def odds_note(rules: PrizeRules | None = None) -> str:
         "Every draw is independent, so past results do not change the odds. "
         f"TOTO Group 1 is 1 in {fmt_num(C.TOTO_COMBOS)} per board, and any TOTO prize is about "
         f"1 in {fmt_num(C.TOTO_COMBOS / C.TOTO_ANY_PRIZE_COMBOS)}. A 4D Big bet wins some prize "
-        f"{C.FOURD_NUMBERS_PER_DRAW} times in {fmt_num(C.FOURD_SPACE)}. On average TOTO pays "
+        f"{C.FOURD_NUMBERS_PER_DRAW} times in {fmt_num(C.FOURD_SPACE)}. Across all draws TOTO pays "
         f"{pct(rules.pool_share_of_sales, 0)} of sales back as prizes and a 4D Big bet returns "
-        f"{per_dollar(big)} per $1, so no number or strategy beats the odds. Never spend above "
-        "your budget."
+        f"{per_dollar(big)} per $1. A snowballed jackpot can lift one draw's average return per $1, "
+        "even above $1, but almost every ticket still wins nothing, and no number or strategy "
+        "changes the odds. Never spend above your budget."
     )
 
 
@@ -391,6 +417,9 @@ def toto_signal(ctx: Context) -> dict:
         streak = int(bs.no_winner_streak)
     else:
         streak = no_winner_streak(ctx.toto) if _frame(ctx.toto) is not None else 0
+    if next_draw(ctx, "toto").held:
+        # Sales for a draw already held are closed: its jackpot and buy signal are of no use.
+        jackpot, bs = None, None
     return {
         "jackpot": jackpot,
         "draw_type": draw_type,
@@ -402,6 +431,53 @@ def toto_signal(ctx: Context) -> dict:
         "boards": as_float(bs.boards_estimate) if bs is not None else None,
         "boards_method": bs.boards_method if bs is not None else "",
     }
+
+
+def held_text(ctx: Context) -> str | None:
+    """Plain notice for each game whose next draw was held earlier today but whose result is
+    not stored yet (see ``NextDraw.held``), or None."""
+    items = []
+    for game in GAME_NAMES:
+        nd = next_draw(ctx, game)
+        if nd.held:
+            draw = f"{GAME_NAMES[game]} draw {nd.number}" if nd.number else f"The {GAME_NAMES[game]} draw"
+            items.append(f"{draw} was held at {fmt_time(nd.when)} today, result not out yet.")
+    return " ".join(items) or None
+
+
+def _held_plan_text(nd: NextDraw) -> str:
+    return (f"No suggestions: this draw was held at {fmt_time(nd.when)} today and its sales are closed. "
+            "Suggestions for the draw after it come once its result is stored.")
+
+
+def picks_not_in_plan(plan: Plan | None, picks: Sequence[Any], game: str) -> list[Any]:
+    """Picks the plan does not buy, either on their own or as a board inside a System 7 line.
+
+    The one rule for "is this pick bought", shared by the report, message 3 and the notes.
+    """
+    if plan is None:
+        return list(picks)
+    labels = {ln.label for ln in plan.lines}
+    sys7 = [{int(x) for x in str(ln.numbers).split()} for ln in plan.lines if ln.label == "System 7"]
+
+    def inside_sys7(pick: Any) -> bool:
+        if game != "toto" or not sys7:
+            return False
+        nums = {int(x) for x in toto_nums(pick.numbers).split()}
+        return any(nums <= s for s in sys7)
+
+    return [p for p in picks if p.name not in labels and not inside_sys7(p)]
+
+
+# Sentences that restate the odds note, which the report and message 3 already carry once.
+_ODDS_REPEAT = re.compile(r"independen|\bodds\b", re.IGNORECASE)
+
+
+def commentary_text(text: Any) -> str:
+    """The optional commentary without sentences that restate independence or the odds (the
+    odds statement is said once, by ``odds_note`` / ``odds_line``). "" when nothing is left."""
+    sentences = re.split(r"(?<=[.!?])\s+", clean_text(text))
+    return " ".join(s for s in sentences if s and not _ODDS_REPEAT.search(s))
 
 
 def _ev_rows(breakdown: dict) -> list[list[str]]:
@@ -596,6 +672,9 @@ def _md_section1(ctx: Context) -> str:
     if sig["boards"] is not None:
         rows.append(["Sales estimate", f"about {fmt_num(sig['boards'])} boards ({clean_text(sig['boards_method'])})"])
     parts.append(md_table(["Item", "Value"], rows, align="ll"))
+    if nd.held:
+        parts.append(f"This draw was held at {fmt_time(nd.when)} today and its result is not out yet, so its "
+                     "sales are closed and there is no buy signal for it.")
     if sig["reason"]:
         parts.append(clean_text(sig["reason"]))
     ev_rows = _ev_rows(sig["breakdown"])
@@ -679,13 +758,15 @@ def _md_section3(ctx: Context) -> str:
         label = GAME_NAMES[game]
         when = f"draw {nd.number}, {fmt_date(nd.day)}" if nd.number else "the next draw"
         parts.append(f"### {label} for {when}")
+        if nd.held:
+            parts.append(_held_plan_text(nd))
+            continue
         parts.append(plan_md(plan, game))
         if plan is not None:
             total += plan.total
             budget += plan.budget
         picks = ctx.toto_picks if game == "toto" else ctx.fourd_picks
-        bought = {ln.label for ln in plan.lines} if plan is not None else set()
-        extra = [p for p in picks if p.name not in bought]
+        extra = picks_not_in_plan(plan, picks, game)
         if extra:
             if game == "toto":
                 rows = [[clean_text(p.name), toto_nums(p.numbers), clean_text(p.reason)] for p in extra]
@@ -897,18 +978,26 @@ def report_warnings(ctx: Context) -> list[str]:
 
 
 def _stale_text(ctx: Context) -> str | None:
-    """Plain notice when the stored results of a game reported in this run are behind (draws
-    were held after the newest one), or None when they are up to date."""
-    behind = []
-    for game in (g for g in GAME_NAMES if g in ctx.games_drawn):
+    """Plain notice when the stored results of a game are behind (draws were held after the
+    newest one), or None when they are up to date. A game this run did not fetch (not in
+    ``ctx.games_drawn``) gets its own sentence: its newer draws come with its next run."""
+    behind, others = [], []
+    for game in GAME_NAMES:
         last_no, _ = _last_stored(ctx, game)
-        if last_no and next_draw(ctx, game).stale:
+        if not last_no or not next_draw(ctx, game).stale:
+            continue
+        if game in ctx.games_drawn:
             behind.append(f"{GAME_NAMES[game]} draw {last_no}")
-    if not behind:
-        return None
-    return (f"Results not up to date: the newest stored {'results are' if len(behind) > 1 else 'result is'} "
-            f"{_and_list(behind)}, and newer draws have been held since. The Singapore Pools site could not "
-            "be read, or fetching was turned off.")
+        else:
+            others.append(f"{GAME_NAMES[game]} results are not up to date: the newest stored draw is {last_no}, "
+                          f"and newer draws have been held since. They are fetched on the next run that "
+                          f"covers {GAME_NAMES[game]}.")
+    parts = []
+    if behind:
+        parts.append(f"Results not up to date: the newest stored {'results are' if len(behind) > 1 else 'result is'} "
+                     f"{_and_list(behind)}, and newer draws have been held since. The Singapore Pools site could "
+                     "not be read or did not have every result yet, or fetching was turned off.")
+    return " ".join(parts + others) or None
 
 
 def full_report(ctx: Context) -> str:
@@ -920,6 +1009,9 @@ def full_report(ctx: Context) -> str:
     stale = _stale_text(ctx)
     if stale:
         parts.append(f"**{stale}**")
+    held = held_text(ctx)
+    if held:
+        parts.append(f"**{held}**")
     warnings = report_warnings(ctx)
     if warnings:
         parts.append("> [!warning] Warnings\n" + "\n".join(f"> * {w}" for w in warnings))
@@ -928,8 +1020,9 @@ def full_report(ctx: Context) -> str:
     for build in builders:
         parts.append(build(ctx))
     parts.append(f"{SECTION_HEADINGS[5]}\n\n{odds_note(ctx.rules)}")
-    if ctx.commentary:
-        parts.append(f"*Commentary:* {clean_text(ctx.commentary)}")
+    comment = commentary_text(ctx.commentary)
+    if comment:
+        parts.append(f"*Commentary:* {comment}")
     return "\n\n".join(parts).rstrip() + "\n"
 
 
@@ -1052,7 +1145,8 @@ def _tg_tickets(ctx: Context, level: int) -> str:
         if no_draw:
             lines.append(f"{plural(no_draw, 'ticket')} ({dollars(_no_draw_cost(ctx))}) "
                          f"{'has' if no_draw == 1 else 'have'} no draw on {'its' if no_draw == 1 else 'their'} "
-                         "date and still counts as spent. Check the date in Tickets.md.")
+                         f"date and still {'counts' if no_draw == 1 else 'count'} as spent. Check the date in "
+                         "Tickets.md.")
     elif not settled:
         lines.append("Add the tickets you buy to Tickets.md in the vault and the bot will check them.")
     if ctx.bad_ticket_lines:
@@ -1074,6 +1168,9 @@ def _tg_message1(ctx: Context, level: int) -> list[str]:
     stale = _stale_text(ctx)
     if stale:
         blocks.append(f"<i>{_h(stale)}</i>")
+    held = held_text(ctx)
+    if held:
+        blocks.append(f"<i>{_h(held)}</i>")
     drawn = [g for g in ctx.games_drawn if g in GAME_NAMES]
     if "toto" in drawn:
         blocks.append(_tg_toto_result(ctx))
@@ -1091,6 +1188,10 @@ def _tg_message2(ctx: Context, level: int) -> list[str]:
     draw = f" (draw {nd.number})" if nd.number else ""
     special = str(sig["draw_type"]) != "normal"
     dtype = draw_type_name(sig["draw_type"])
+    if nd.held:
+        lines = [f"<b>Next TOTO draw</b>{draw}: {_h(nd.when_text)}",
+                 "Its sales are closed, so there is no buy signal for it."]
+        return ["\n".join(lines), _tg_fourd_next(ctx)]
     lines = [
         f"<b>Next TOTO draw</b>{draw}: {_h(nd.when_text)}",
         "Estimated jackpot: " + (f"<b>{money(sig['jackpot'])}</b>" if sig["jackpot"] is not None
@@ -1111,8 +1212,10 @@ def _tg_message2(ctx: Context, level: int) -> list[str]:
         lines.append("Return per $1: not available")
     if sig["boards"] is not None and level < 2:
         lines.append(f"Sales estimate: about {fmt_num(sig['boards'])} boards ({_h(sig['boards_method'])}).")
-    toto_block = "\n".join(lines)
+    return ["\n".join(lines), _tg_fourd_next(ctx)]
 
+
+def _tg_fourd_next(ctx: Context) -> str:
     nd4 = next_draw(ctx, "4d")
     draw4 = f" (draw {nd4.number})" if nd4.number else ""
     lines4 = [
@@ -1125,12 +1228,14 @@ def _tg_message2(ctx: Context, level: int) -> list[str]:
         lines4.append(f"Return per $1: Big <b>{per_dollar(values.get('Big'))}</b>, Small "
                       f"<b>{per_dollar(values.get('Small'))}</b>. {_h(values.get('best') or 'Big')} gives "
                       "the most back.")
-    return [toto_block, "\n".join(lines4)]
+    return "\n".join(lines4)
 
 
 def _tg_plan(plan: Plan | None, game: str, nd: NextDraw, picks: Sequence[Any], level: int) -> str:
     label = GAME_NAMES[game]
     when = f"draw {nd.number}, {fmt_date(nd.day)}" if nd.number else "next draw"
+    if nd.held:
+        return f"<b>{label} {when}</b>\n{_h(_held_plan_text(nd))}"
     if plan is None:
         return f"<b>{label}</b> ({when})\nNo {label} plan this run."
     lines = [f"<b>{label} {when}</b>, budget {dollars(plan.budget)}"]
@@ -1159,7 +1264,7 @@ def _tg_plan(plan: Plan | None, game: str, nd: NextDraw, picks: Sequence[Any], l
             lines.append(_h(sys_note))
     if plan.lines:
         lines.append(f"{label} total: <b>{dollars(plan.total)}</b> of your {dollars(plan.budget)} budget")
-    unbought = [p for p in picks if p.name not in {ln.label for ln in plan.lines}]
+    unbought = picks_not_in_plan(plan, picks, game)
     if unbought and level < 2:
         lines.append(f"Not in the plan (details in the report): {_h(_and_list([p.name for p in unbought]))}.")
     return "\n".join(lines)
@@ -1169,8 +1274,9 @@ def _tg_message3(ctx: Context, level: int) -> list[str]:
     blocks = ["<b>Suggested numbers</b>"]
     total = budget = 0.0
     for game, plan, picks in (("toto", ctx.toto_plan, ctx.toto_picks), ("4d", ctx.fourd_plan, ctx.fourd_picks)):
-        blocks.append(_tg_plan(plan, game, next_draw(ctx, game), picks, level))
-        if plan is not None:
+        nd = next_draw(ctx, game)
+        blocks.append(_tg_plan(plan, game, nd, picks, level))
+        if plan is not None and not nd.held:
             total += plan.total
             budget += plan.budget
     blocks.append(f"Total for both games: <b>{dollars(total)}</b> of your {dollars(budget)} budget.")
@@ -1179,8 +1285,9 @@ def _tg_message3(ctx: Context, level: int) -> list[str]:
     if bt and level < 4:
         blocks.append("<b>Backtest</b>\n" + "\n".join(_h(b) for b in bt))
     blocks.append(f"<i>{_h(odds_line())}</i>")
-    if ctx.commentary and level < 4:
-        blocks.append(f"<i>{_h(ctx.commentary)}</i>")
+    comment = commentary_text(ctx.commentary)
+    if comment and level < 4:
+        blocks.append(f"<i>{html_escape(comment)}</i>")
     return blocks
 
 

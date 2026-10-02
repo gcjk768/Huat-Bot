@@ -482,11 +482,13 @@ class Done:
 def test_serve_runs_again_when_the_first_run_did_not_finish():
     clock = FakeClock(sg(2026, 10, 5, 10, 0))  # Monday, TOTO
     rec = Recorder(clock, latest={"toto": published_today})
-    done = Done(False, True)  # the first run could not fetch the result page, the second did
+    # Each check asks done_fn before the run (not done yet) and after it: the first run could not
+    # fetch the result page, the second did.
+    done = Done(False, False, False, True)
     serve(rec.run, rec.check, rec.refresh, rec.notify, rec.log, clock.now, clock.sleep, SchedulerConfig(),
           max_cycles=1, done_fn=done)
     assert rec.runs == [(sg(2026, 10, 5, 19, 30), ("toto",)), (sg(2026, 10, 5, 19, 40), ("toto",))]
-    assert done.calls == [("toto", date(2026, 10, 5))] * 2
+    assert done.calls == [("toto", date(2026, 10, 5))] * 4
     assert rec.notices == [] and rec.events("ERROR") == []
     assert rec.events("WAIT") == ["TOTO result for Mon 5 Oct 2026 is out but was not stored or posted yet, "
                                   "trying again at 7.40pm"]
@@ -534,9 +536,24 @@ def test_serve_quiet_run_finishes_at_once():
     clock = FakeClock(sg(2026, 10, 5, 10, 0))
     rec = Recorder(clock, latest={"toto": published_today})
     serve(rec.run, rec.check, rec.refresh, rec.notify, rec.log, clock.now, clock.sleep, SchedulerConfig(),
-          max_cycles=1, done_fn=Done(True))
+          max_cycles=1, done_fn=Done(False, True))
     assert rec.runs == [(sg(2026, 10, 5, 19, 30), ("toto",))]
     assert rec.notices == [] and rec.events("WAIT") == []
+
+
+def test_serve_does_not_rerun_a_draw_already_stored_and_posted_after_a_restart():
+    # Sat 3 Oct: the 4D draw was stored and posted at 7.30pm, the container was killed at 7.45pm
+    # and restarted at 7.50pm, inside the retry window.
+    clock = FakeClock(sg(2026, 10, 3, 19, 50))
+    rec = Recorder(clock, latest={"4d": published_today})
+    done = Done(True)
+    serve(rec.run, rec.check, rec.refresh, rec.notify, rec.log, clock.now, clock.sleep, SchedulerConfig(),
+          max_cycles=1, done_fn=done)
+    assert rec.runs == []
+    assert done.calls == [("4d", date(2026, 10, 3))]
+    assert "4D result for Sat 3 Oct 2026 was already handled by an earlier run, so it is not run again" in \
+        rec.events("SCHEDULE")
+    assert rec.notices == [] and rec.events("WAIT") == [] and rec.events("ERROR") == []
 
 
 def test_serve_runs_each_game_as_soon_as_it_is_out():

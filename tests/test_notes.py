@@ -8,7 +8,7 @@ import pandas as pd
 import pytest
 import yaml
 
-from huatbot import notes, report
+from huatbot import notes, report, suggest
 from huatbot.models import Settings
 from huatbot.store import empty_ledger, fourd_numbers, toto_numbers
 from huatbot.textfmt import find_prose_dashes, has_prose_dashes
@@ -136,9 +136,26 @@ def test_suggestions_notes(ctx):
             assert line.numbers in body
     toto_fm = _check_note(specs[0])[1]
     assert toto_fm["tags"] == ["huatbot", "suggestion", "toto"] and toto_fm["draw"] == 4124
-    assert len(toto_fm["sets"]) == 4
+    assert toto_fm["sets"] == [ln.numbers for ln in ctx.toto_plan.lines]
     fourd_fm = _check_note(specs[1])[1]
-    assert fourd_fm["numbers"].split() == [p.number for p in ctx.fourd_picks]
+    assert fourd_fm["numbers"].split() == [ln.numbers for ln in ctx.fourd_plan.lines]
+
+
+def test_suggestion_properties_list_only_what_the_plan_buys(ctx):
+    # $2 for TOTO buys 2 sets, $12 adds a System 7 line, $3 for 4D buys 3 numbers: the
+    # properties match the What to buy table and total_cost, not the full list of picks.
+    last_draw = toto_numbers(report.latest_row(ctx.toto))
+    for budget in (2.0, 12.0):
+        plan = suggest.toto_plan(ctx.toto_picks, budget, ctx.crowd_scores, True, last_draw)
+        _, fm, _ = _check_note(notes.suggestions_notes(variant(ctx, toto_plan=plan))[0])
+        assert fm["sets"] == [ln.numbers for ln in plan.lines]
+        assert fm["total_cost"] == plan.total
+    assert len(suggest.toto_plan(ctx.toto_picks, 2.0, ctx.crowd_scores, True, last_draw).lines) == 2
+    assert any(ln.label == "System 7" for ln in
+               suggest.toto_plan(ctx.toto_picks, 12.0, ctx.crowd_scores, True, last_draw).lines)
+    small = suggest.fourd_plan(ctx.fourd_picks, 3.0, ctx.fourd_bet_values)
+    _, fm, _ = _check_note(notes.suggestions_notes(variant(ctx, fourd_plan=small))[1])
+    assert fm["numbers"].split() == [ln.numbers for ln in small.lines] and len(small.lines) == 3
 
 
 def test_suggestions_skip_games_without_data(ctx):
@@ -319,3 +336,36 @@ def test_write_all_logs_an_error_and_carries_on(tmp_path, ctx, report_md, monkey
     assert "Ledger.md" not in written and "Dashboard.md" in written
     errors = _log_rows(vault, "ERROR")
     assert len(errors) == 1 and "[[Ledger]]" in errors[0]
+
+
+def test_write_all_recreates_a_missing_newest_draw_note(tmp_path, ctx, report_md):
+    # A run stopped after the draw was saved but before its note was written: the next run
+    # finds no new draw, yet the Dashboard links to that note, so it is written now.
+    vault = Vault(tmp_path / "vault")
+    notes.write_all(vault, ctx, report_md)
+    newest, older = "Draws/TOTO/2026-10-01 TOTO 4123.md", "Draws/TOTO/2026-09-28 TOTO 4122.md"
+    vault.path(newest).unlink()
+    vault.path(older).unlink()
+    written = notes.write_all(vault, variant(ctx, new_draws={}), report_md)
+    assert newest in written and vault.exists(newest)
+    assert older not in written and not vault.exists(older)  # only the newest one is linked
+    assert not any(p.startswith("Draws/4D/") for p in written)  # present already
+
+
+def test_write_all_skips_notes_whose_only_change_is_the_time_stamp(tmp_path, ctx, report_md):
+    vault = Vault(tmp_path / "vault")
+    notes.write_all(vault, ctx, report_md)
+    keep = {rel: vault.read_text(rel) for rel in ("Ledger.md", f"Suggestions/{TOTO_SUGGESTION}.md",
+                                                  f"Suggestions/{FOURD_SUGGESTION}.md")}
+    later = variant(ctx, now=ctx.now + pd.Timedelta(hours=1), new_draws={})
+    logged = len(_log_rows(vault, "NOTE"))
+    written = notes.write_all(vault, later, report.full_report(later))
+    assert set(written) == {"Dashboard.md", "Reports/2026-10-01 2030 Report.md"}
+    for rel, text in keep.items():
+        assert vault.read_text(rel) == text, rel
+    assert len(_log_rows(vault, "NOTE")) == logged + 2  # no "Updated [[Ledger]]" or suggestion rows
+
+    # A real change is still written, with its new time stamp.
+    changed = variant(later, ledger_totals={**ctx.ledger_totals, "spent": 99.0})
+    assert "Ledger.md" in notes.write_all(vault, changed, report.full_report(changed))
+    assert vault.read_note("Ledger.md")[0]["updated"].startswith("2026-10-01T20:30")

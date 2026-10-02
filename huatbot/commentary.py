@@ -41,7 +41,7 @@ Rules:
 1. At most {max_words} words in one short paragraph of plain sentences. No markdown, no lists, no headings, no emojis.
 2. Use only the figures in the JSON below, written exactly as they appear there. Do not add, round, convert or calculate any number.
 3. Never use dashes or hyphens of any kind. Write negative amounts as "minus $20" and ranges with the word "to".
-4. Every draw is independent, so past results do not change the odds. Never suggest a strategy beats the odds and never suggest spending above the budget.
+4. Every draw is independent, so past results do not change the odds. Never suggest a strategy beats the odds and never suggest spending above the budget. Do not restate the independence point or the odds yourself: the message already says them once.
 5. Reply with the commentary text only.
 
 Figures (JSON):

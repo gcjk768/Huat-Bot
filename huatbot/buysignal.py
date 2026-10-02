@@ -168,8 +168,18 @@ def buy_signal(
 
     special = settings.alert_on_special_draws and draw_type in SPECIAL_TYPES
     type_name = _TYPE_NAMES.get(draw_type, draw_type)
-    ev_part = (f", and each $1 returns about {_per_dollar(total)} on average" if total is not None
-               else ", but there is not enough history to estimate the return per $1")
+    if total is None:
+        ev_part = ", but there is not enough history to estimate the return per $1"
+    else:
+        ev_part = f", and each $1 returns about {_per_dollar(total)} on average"
+        if total >= 1:
+            # An average above $1 comes from a prize almost nobody wins: say so in the same
+            # sentence, so the figure never reads as advice to buy more.
+            top = C.TOTO_GROUP_COMBOS[1] + (C.TOTO_GROUP_COMBOS[2] if ev.get("cascade", 0.0) > 0 else 0)
+            boards_text = "board" if top == 1 else "boards"
+            ev_part += (f", but most of that average comes from the jackpot, which only {top} {boards_text} "
+                        f"in {C.TOTO_COMBOS:,} can win, so almost every ticket still loses and it is no "
+                        "reason to spend above your budget")
 
     if jackpot is not None and jackpot >= settings.jackpot_alert:
         label = "HIGH"

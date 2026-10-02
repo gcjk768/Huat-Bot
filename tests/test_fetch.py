@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import math
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import pandas as pd
 import pytest
@@ -332,17 +332,49 @@ def test_fetch_next_draws_from_pages(toto_df, fourd_df):
     assert f.draw_datetime is not None and f.draw_datetime.tzinfo is not None
 
 
+def _streak_df_ending(winners: list[int], end: date) -> pd.DataFrame:
+    """_streak_df whose newest draw is on ``end`` (a TOTO day)."""
+    df = _streak_df(winners)
+    df["draw_date"] = pd.to_datetime(start_dates(end, len(winners)))
+    return df
+
+
+def start_dates(end: date, n: int) -> list[date]:
+    """The last ``n`` regular TOTO draw days up to ``end``, oldest first."""
+    days, d = [], end
+    while len(days) < n:
+        if d.weekday() in C.TOTO_WEEKDAYS:
+            days.append(d)
+        d -= timedelta(days=1)
+    return days[::-1]
+
+
 def test_fetch_next_draws_predicts_cascade_from_history():
-    df = _streak_df([1, 0, 0, 0])  # 3 snowballs in a row: the next draw is the 4th
+    # The stored history ends Thu 1 Oct, the next draw page shows Mon 5 Oct.
+    df = _streak_df_ending([1, 0, 0, 0], date(2026, 10, 1))  # 3 snowballs in a row: the next draw is the 4th
     site = static_site()
     t, f = F.fetch_next_draws(site, df)
     assert t.draw_type_hint is None and t.draw_type == "cascade"
     assert t.draw_datetime == datetime(2026, 10, 5, 18, 30, tzinfo=SG)
     assert f.draw_datetime == datetime(2026, 10, 3, 18, 30, tzinfo=SG)
-    t2, _ = F.fetch_next_draws(site, _streak_df([1, 0, 0]))
+    t2, _ = F.fetch_next_draws(site, _streak_df_ending([1, 0, 0], date(2026, 10, 1)))
     assert t2.draw_type == "normal"
     t3, _ = F.fetch_next_draws(site, empty_toto())
     assert t3.draw_type == "normal"
+
+
+def test_fetch_next_draws_does_not_predict_a_cascade_from_stale_history():
+    # The stored history ends Mon 28 Sep with 3 snowballs, but Thu 1 Oct was held and is not
+    # stored: the Mon 5 Oct draw may be anything, so no cascade (and no HIGH signal) is claimed.
+    from huatbot import buysignal
+    from huatbot.models import PrizeRules, Settings
+
+    df = _streak_df_ending([1, 0, 0, 0], date(2026, 9, 28))
+    t, _ = F.fetch_next_draws(static_site(), df)
+    assert t.draw_type == "normal" and t.draw_type_hint is None
+    signal = buysignal.buy_signal(t, df, Settings(jackpot_alert=1e12), PrizeRules())
+    assert signal.draw_type == "normal" and signal.label != "HIGH"
+    assert not signal.ev_breakdown.get("cascade")
 
 
 def test_fetch_next_draws_missing_pages():
@@ -496,6 +528,7 @@ def test_incomplete_stored_newest_draw_is_read_again(toto_df):
     df, res = F.update_toto(site, df, start_draw=int(toto_df["draw_number"].min()), now=NOW)
     assert res.new_draws == [] and res.verified
     assert any(f"TOTO draw {latest} was updated with its winning shares" in m for m in res.messages)
+    assert res.repaired_draws == [latest]
     fixed = df.set_index("draw_number").loc[latest]
     expected = toto_df.set_index("draw_number").loc[latest]
     assert int(fixed["g7_winners"]) == int(expected["g7_winners"]) > 0

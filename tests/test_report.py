@@ -10,7 +10,7 @@ import pytest
 
 from huatbot import buysignal, report, suggest
 from huatbot import constants as C
-from huatbot.models import NextToto, PrizeRules
+from huatbot.models import NextFourD, NextToto, PrizeRules
 from huatbot.store import empty_ledger, fourd_numbers, toto_numbers
 from huatbot.textfmt import contains_dash, has_prose_dashes
 from huatbot.tickets import ledger_totals
@@ -244,7 +244,7 @@ def test_message3_suggestions_costs_and_extras(ctx):
         assert line.numbers in msg
     assert f"TOTO total: <b>{report.dollars(ctx.toto_plan.total)}</b> of your $10 budget" in msg
     assert f"4D total: <b>{report.dollars(ctx.fourd_plan.total)}</b> of your $5 budget" in msg
-    assert "System 7 option" in msg
+    assert any(ln.label == "System 7" for ln in ctx.toto_plan.lines)  # $10 fits a System 7 and 3 sets
     assert "<b>Backtest</b>" in msg and "random" in msg
     assert "1 in 13,983,816" in msg and "about 1 in 54" in msg and "23 times in 10,000" in msg
     assert ctx.toto_picks[0].reason.split(":")[0][:20] in msg  # reasons shown at full detail
@@ -415,7 +415,16 @@ def test_full_report_suggestions_within_budget(ctx):
     assert f"**Total for both games: {report.dollars(total)} of the {report.dollars(budget)} budget.**" in section
     for line in ctx.toto_plan.lines + ctx.fourd_plan.lines:
         assert line.numbers in section
-    assert "Alternative for the same budget" in section  # the System 7 option
+    nine = report.full_report(_with_budgets(ctx, 9, 5))
+    assert "Alternative for the same budget" in nine  # the System 7 option
+
+
+def test_message3_offers_the_system7_option_when_it_does_not_fit_next_to_the_sets(ctx):
+    nine = _with_budgets(ctx, 9, 5)
+    assert nine.toto_plan.alternative is not None
+    msg = report.telegram_messages(nine)[2]
+    assert "System 7 option" in msg
+    assert_valid_message(msg)
 
 
 def test_full_report_includes_commentary_when_present(ctx):
@@ -470,6 +479,7 @@ def test_next_draw_later_today_is_still_the_next_draw(ctx):
     monday = variant(ctx, now=_sg(2026, 10, 5))
     nd = report.next_draw(monday, "toto")
     assert str(nd.day) == "2026-10-05" and nd.number == 4124 and not nd.stale and not nd.from_schedule
+    assert nd.held  # its draw time (6.30pm) has passed: no buy signal or suggestions for it
 
 
 def test_next_draw_page_showing_the_draw_just_held_is_not_used(ctx):
@@ -510,11 +520,32 @@ def test_stored_results_a_week_old_are_marked_not_up_to_date(ctx):
 
 
 def test_message3_does_not_suggest_buying_beyond_the_plan(ctx):
-    msg = report.telegram_messages(ctx)[2]
-    assert "if the budget allows" not in msg
-    bought = {ln.label for ln in ctx.toto_plan.lines}
-    if any(p.name not in bought for p in ctx.toto_picks):
-        assert "Not in the plan (details in the report)" in msg
+    for c in (ctx, _with_budgets(ctx, 3, 5)):
+        msg = report.telegram_messages(c)[2]
+        assert "if the budget allows" not in msg
+        unbought = report.picks_not_in_plan(c.toto_plan, c.toto_picks, "toto")
+        assert ("Not in the plan (details in the report)" in msg) == bool(unbought)
+    # A $3 budget buys 3 sets: the fourth pick is named as not in the plan.
+    small = _with_budgets(ctx, 3, 5)
+    left_out = report.picks_not_in_plan(small.toto_plan, small.toto_picks, "toto")
+    assert [p.name for p in left_out] == ["Overdue"]
+
+
+@pytest.mark.parametrize("budget", [10, 11])
+def test_system7_source_set_is_not_listed_as_not_in_the_plan(ctx, budget):
+    # The System 7 is built from the Low Crowd set, which is then not bought on its own: it is
+    # still in the plan, as one of the System 7's boards.
+    c = _with_budgets(ctx, budget, 5)
+    labels = [ln.label for ln in c.toto_plan.lines]
+    assert "System 7" in labels and "Low Crowd" not in labels
+    assert report.picks_not_in_plan(c.toto_plan, c.toto_picks, "toto") == []
+    msg = report.telegram_messages(c)[2]
+    assert "Not in the plan" not in msg
+    assert "The Low Crowd set plus" in msg
+    section = report.full_report(c).split(report.SECTION_HEADINGS[2])[1].split(report.SECTION_HEADINGS[3])[0]
+    toto_part = section.split("### 4D for")[0]
+    assert "Also suggested, not in the plan" not in toto_part
+    assert "Low Crowd set is not bought on its own" in toto_part
 
 
 def test_message1_mentions_tickets_dated_on_a_day_without_a_draw(ctx):
@@ -527,3 +558,129 @@ def test_message1_mentions_tickets_dated_on_a_day_without_a_draw(ctx):
     msg = report.telegram_messages(variant(ctx, ledger=ledger, ledger_totals=ledger_totals(ledger)))[0]
     assert "1 ticket ($3) has no draw on its date and still counts as spent. Check the date in Tickets.md." in msg
     assert "no draw on" not in report.telegram_messages(ctx)[0]
+    second = extra.copy()
+    second["ticket_id"] = "no-draw-ticket-2"
+    two = pd.concat([ledger, second], ignore_index=True)
+    msg2 = report.telegram_messages(variant(ctx, ledger=two, ledger_totals=ledger_totals(two)))[0]
+    assert "2 tickets ($6) have no draw on their date and still count as spent." in msg2
+
+
+# Missed draws of the game this run did not fetch
+
+
+def _with_draw(df, number, day):
+    """``df`` with one more draw (a copy of the newest row) numbered ``number`` on ``day``."""
+    row = df.iloc[[-1]].copy()
+    row["draw_number"] = number
+    row["draw_date"] = pd.Timestamp(day)
+    return pd.concat([df, row], ignore_index=True)
+
+
+def _suggestion_paths(c):
+    from huatbot import notes
+    return [path for path, _, _ in notes.suggestions_notes(c)]
+
+
+def test_next_4d_draw_after_a_missed_4d_draw_has_no_number(ctx):
+    # Sat 3 Oct 4D 5433 is stored, Sun 4 Oct (5434) was missed, and the Mon 5 Oct TOTO run does
+    # not fetch 4D. The next 4D draw page shows Wed 7 Oct, which is draw 5435, not 5434.
+    toto = _with_draw(ctx.toto, 4124, date(2026, 10, 5))
+    fourd = _with_draw(ctx.fourd, 5433, date(2026, 10, 3))
+    c = variant(ctx, toto=toto, fourd=fourd, now=_sg(2026, 10, 5, 19, 45), games_drawn=("toto",),
+                next_toto=NextToto(_sg(2026, 10, 8, 18, 30), 1_500_000.0, "normal", None),
+                next_fourd=NextFourD(_sg(2026, 10, 7, 18, 30)))
+    nd4 = report.next_draw(c, "4d")
+    assert nd4.number is None and nd4.stale and not nd4.from_schedule and str(nd4.day) == "2026-10-07"
+    assert nd4.when_text == "Wed 7 Oct 2026, 6.30pm (results are not up to date)"
+    nd = report.next_draw(c, "toto")
+    assert nd.number == 4125 and not nd.stale and not nd.held
+    msgs = report.telegram_messages(c)
+    assert "4D results are not up to date: the newest stored draw is 5433" in msgs[0]
+    assert "site could not" not in msgs[0] and "Results not up to date" not in msgs[0]
+    assert "<b>Next 4D draw</b>: Wed 7 Oct 2026, 6.30pm (results are not up to date)" in msgs[1]
+    assert "5434" not in msgs[1] and "5434" not in msgs[2]
+    assert "TOTO draw 4125, Thu 8 Oct 2026" in msgs[2]
+    for msg in msgs:
+        assert_valid_message(msg)
+    assert "4D results are not up to date" in report.full_report(c)
+    paths = _suggestion_paths(c)
+    assert "Suggestions/2026-10-08 TOTO 4125.md" in paths
+    assert not any("4D" in p for p in paths)  # no "2026-10-07 4D 5434.md"
+
+
+def test_next_toto_draw_after_a_missed_toto_draw_has_no_number(ctx):
+    # TOTO 4123 (Thu 1 Oct) is stored, Mon 5 Oct (4124) was missed, and the Wed 7 Oct 4D run does
+    # not fetch TOTO. The next TOTO draw page shows Thu 8 Oct, which is draw 4125.
+    fourd = _with_draw(_with_draw(_with_draw(ctx.fourd, 5433, date(2026, 10, 3)), 5434, date(2026, 10, 4)),
+                       5435, date(2026, 10, 7))
+    c = variant(ctx, fourd=fourd, now=_sg(2026, 10, 7, 19, 45), games_drawn=("4d",),
+                next_toto=NextToto(_sg(2026, 10, 8, 18, 30), 1_500_000.0, "normal", None),
+                next_fourd=NextFourD(_sg(2026, 10, 10, 18, 30)))
+    nd = report.next_draw(c, "toto")
+    assert nd.number is None and nd.stale and str(nd.day) == "2026-10-08"
+    assert report.next_draw(c, "4d").number == 5436
+    msgs = report.telegram_messages(c)
+    assert "TOTO results are not up to date: the newest stored draw is 4123" in msgs[0]
+    assert "4124" not in msgs[1] and "4124" not in msgs[2]
+    assert "<b>Next TOTO draw</b>: Thu 8 Oct 2026, 6.30pm (results are not up to date)" in msgs[1]
+    paths = _suggestion_paths(c)
+    assert "Suggestions/2026-10-10 4D 5436.md" in paths
+    assert not any("TOTO" in p for p in paths)  # no "2026-10-08 TOTO 4124.md"
+
+
+def test_next_draw_page_without_missed_draws_keeps_its_number(ctx):
+    # Thu 1 Oct to Mon 5 Oct and Wed 30 Sep to Sat 3 Oct hold no regular draw day in between.
+    assert report.next_draw(ctx, "toto").number == 4124 and not report.next_draw(ctx, "toto").stale
+    assert report.next_draw(ctx, "4d").number == 5433 and not report.next_draw(ctx, "4d").stale
+    assert report._stale_text(ctx) is None
+
+
+# A draw held earlier today whose result is not stored yet
+
+
+def test_draw_held_earlier_today_gets_no_signal_and_no_suggestions(ctx):
+    # Mon 5 Oct at 9pm: the 6.30pm TOTO draw is held, its result is late (not stored yet).
+    late = variant(ctx, now=_sg(2026, 10, 5, 21, 0))
+    nd = report.next_draw(late, "toto")
+    assert nd.held and nd.number == 4124 and str(nd.day) == "2026-10-05" and not nd.stale
+    assert nd.when_text == "Mon 5 Oct 2026, 6.30pm (draw held, result not out yet)"
+    sig = report.toto_signal(late)
+    assert sig["label"] is None and sig["jackpot"] is None and sig["ev"] is None
+    msgs = report.telegram_messages(late)
+    assert "TOTO draw 4124 was held at 6.30pm today, result not out yet." in msgs[0]
+    assert "(draw held, result not out yet)" in msgs[1]
+    assert "Buy signal" not in msgs[1] and "Estimated jackpot" not in msgs[1]
+    assert report.money(ctx.next_toto.jackpot_estimate) not in msgs[1]
+    assert "No suggestions: this draw was held at 6.30pm today" in msgs[2]
+    for line in ctx.toto_plan.lines:
+        assert line.numbers not in msgs[2]
+    assert f"Total for both games: <b>{report.dollars(ctx.fourd_plan.total)}</b>" in msgs[2]
+    for msg in msgs:
+        assert_valid_message(msg)
+    text = report.full_report(late)
+    assert "TOTO draw 4124 was held at 6.30pm today, result not out yet." in text
+    section = text.split(report.SECTION_HEADINGS[2])[1].split(report.SECTION_HEADINGS[3])[0]
+    assert "No suggestions: this draw was held" in section
+    assert not any(line.numbers in section for line in ctx.toto_plan.lines)
+    assert not has_prose_dashes(text)
+    # Before the draw time the same draw is open for sales as usual.
+    before = variant(ctx, now=_sg(2026, 10, 5, 17, 0))
+    assert not report.next_draw(before, "toto").held
+    assert "held" not in report.telegram_messages(before)[1]
+
+
+# Commentary
+
+
+def test_commentary_does_not_repeat_the_odds_statement(ctx):
+    c = variant(ctx, commentary="Every draw is independent, so past results do not change the odds. "
+                                "The jackpot is bigger than last week.")
+    msg = report.telegram_messages(c)[2]
+    assert msg.count("independent") == 1
+    assert "The jackpot is bigger than last week." in msg
+    text = report.full_report(c)
+    assert text.count("independent") == 1
+    assert "*Commentary:* The jackpot is bigger than last week." in text
+    only = variant(ctx, commentary="Remember that every draw is independent.")
+    assert "Commentary" not in report.full_report(only)
+    assert report.telegram_messages(only)[2].count("independent") == 1

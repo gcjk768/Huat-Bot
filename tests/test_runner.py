@@ -12,11 +12,11 @@ from datetime import date, datetime, timedelta
 import pandas as pd
 import pytest
 
-from huatbot import backtest, runner, telegram
+from huatbot import backtest, prize_rules, runner, telegram
 from huatbot import constants as C
 from huatbot.fetch import toto_result_url
 from huatbot.http import FetchError
-from huatbot.models import PrizeRules, Settings
+from huatbot.models import NextFourD, NextToto, PrizeRules, Settings
 from huatbot.report import SECTION_HEADINGS
 from huatbot.store import load_fourd, load_ledger, load_toto, save_toto
 from huatbot.synth import SG, synth_next_fourd, synth_next_toto, synth_toto
@@ -275,14 +275,19 @@ def test_posting_is_idempotent_and_a_second_run_fetches_nothing(seeded, toto, fo
 
     # scheduled rerun half an hour later: nothing new on the site, nothing posted again
     fetcher = fake_site(toto, fourd)
+    logged = len(log_rows(vault))
     second = runner.run(vault=vault, fetcher=fetcher, now=NOW + timedelta(minutes=30), out=lambda s: None)
     assert second.ok and not second.posted
     assert second.new_draws == {"toto": [], "4d": []}
     assert result_pages(fetcher) == []
     assert len(tg.sent) == 3
-    rows = log_rows(vault)
+    rows = log_rows(vault)[logged:]
     assert any(e == "POST" and "Nothing new since the last post" in d for e, d in rows)
-    assert any(e == "BACKTEST" and "reused from the cache" in d for e, d in rows)
+    # nothing that merely restates the previous run: cached prize rules and backtests, the same
+    # suggestions and signal, notes whose only change would be their time stamp
+    assert not any(e in ("BACKTEST", "SUGGEST", "SIGNAL") for e, _ in rows), rows
+    assert not any(e == "FETCH" and d.startswith("Prize rules") for e, d in rows), rows
+    assert not any(e == "NOTE" and ("[[Ledger]]" in d or "Suggestions/" in d) for e, d in rows), rows
 
     # a manual run posts again on purpose
     third = runner.run(vault=vault, fetcher=fake_site(toto, fourd), now=NOW + timedelta(minutes=40),
@@ -687,7 +692,16 @@ def test_prize_rules_check_is_logged(first_run, seeded, toto, fourd):
     runner.run(dry_run=True, vault=seeded, fetcher=fake_site(toto, fourd), now=NOW + timedelta(hours=1),
                out=lambda s: None)
     later = log_rows(seeded)[len(log_rows(first_vault)):]
-    assert any(e == "FETCH" and "reused Data/prize_rules.json" in d for e, d in later)
+    assert not any(e == "FETCH" and d.startswith("Prize rules") for e, d in later)  # cache reused: no row
+
+
+def test_prize_rules_row_says_when_the_pages_could_not_be_read(tmp_path):
+    rules = prize_rules.load_prize_rules(FakeFetcher({}), cache_path=tmp_path / "prize_rules.json", now=NOW)
+    assert rules.checked_at == NOW.isoformat(timespec="seconds")
+    text = runner._rules_text(rules, NOW)
+    assert text.startswith("Prize rules: the official prize pages could not be read this run.")
+    assert "checked this run" not in text
+    assert runner._rules_text(PrizeRules(), NOW).startswith("Prize rules: built in values")
 
 
 def test_analysis_failures_and_commentary_failures_get_error_rows(seeded, toto, fourd, monkeypatch, no_send):
@@ -706,13 +720,16 @@ def test_analysis_failures_and_commentary_failures_get_error_rows(seeded, toto, 
 
 
 def test_no_token_with_a_local_env_file_explains_why(seeded, toto, fourd, no_send, tmp_path, monkeypatch):
+    # The CLI reads ./.env (cli.load_dotenv), so a .env without usable values is what to fix.
     workdir = tmp_path / "project"
     workdir.mkdir()
-    (workdir / ".env").write_text("TELEGRAM_BOT_TOKEN=123:abc\nTELEGRAM_CHAT_ID=@huat\n", encoding="utf-8")
+    (workdir / ".env").write_text("TELEGRAM_BOT_TOKEN=\nTELEGRAM_CHAT_ID=@huat\n", encoding="utf-8")
     monkeypatch.chdir(workdir)
     result = runner.run(vault=seeded, fetcher=fake_site(toto, fourd), now=NOW, out=lambda s: None)
     assert not result.posted
-    assert any("Telegram is not set up" in w and ".env" in w and "export" in w for w in result.warnings)
+    hint = [w for w in result.warnings if "Telegram is not set up" in w]
+    assert hint and "The .env file in the working folder has no TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID" in hint[0]
+    assert "only docker compose" not in hint[0] and "export" not in hint[0]
 
 
 # posting
@@ -745,3 +762,119 @@ def test_a_partly_posted_set_is_finished_not_posted_again(seeded, toto, fourd, t
     assert "posting" not in state
     assert state["last_posted"] == {"toto": TOTO_LAST_DRAW, "4d": FOURD_LAST_DRAW}
     assert any(e == "POST" and "remaining 2 messages" in d for e, d in log_rows(vault))
+
+
+def test_tickets_checked_before_a_failed_post_are_posted_on_the_retry(seeded, toto, fourd, tg):
+    vault = seeded
+    assert runner.run(vault=vault, fetcher=fake_site(toto, fourd), now=NOW, out=lambda s: None).posted
+    sent_before = len(tg.sent)
+    bigger = toto_151()
+    monday = datetime(2026, 10, 5, 19, 45, tzinfo=SG)
+
+    # Monday: the tickets for 5 Oct are checked and saved, then Telegram fails.
+    tg.fail = True
+    failed = runner.run(("toto",), vault=vault, fetcher=fake_site(bigger, fourd), now=monday, out=lambda s: None)
+    assert not failed.ok and not failed.posted
+    ledger = load_ledger(vault.ledger_csv)
+    monday_rows = ledger[(ledger["game"] == "TOTO") & (ledger["draw_date"] == "2026-10-05")]
+    assert set(monday_rows["status"]) == {"settled"}
+    assert sorted(vault.load_state()["unposted_settled"]) == sorted(monday_rows["ticket_id"])
+
+    # The retry 10 minutes later checks nothing new, but its message 1 still lists them.
+    tg.fail = False
+    retry = runner.run(("toto",), vault=vault, fetcher=fake_site(bigger, fourd), now=monday + timedelta(minutes=10),
+                       out=lambda s: None)
+    assert retry.ok and retry.posted
+    assert len(tg.sent) == sent_before + 3
+    message1 = tg.sent[sent_before]["text"]
+    assert "No tickets were checked in this run" not in message1
+    assert message1.count("Mon 5 Oct 2026, 3 11 19 27 38 45") == 2  # the Ordinary and the System 7 ticket
+    assert "unposted_settled" not in vault.load_state()
+    assert "Checked in this run: 2 tickets" in vault.read_text("Dashboard.md")
+
+    # Once posted, they are not listed again.
+    later = runner.run(("toto",), vault=vault, fetcher=fake_site(bigger, fourd), now=monday + timedelta(minutes=20),
+                       out=lambda s: None, force_post=True)
+    assert "No tickets were checked in this run" in later.messages[0]
+
+
+def test_a_dry_run_leaves_unposted_tickets_alone(seeded, toto, fourd, no_send):
+    vault = seeded
+    state = vault.load_state()
+    state["unposted_settled"] = ["abc"]
+    vault.save_state(state)
+    runner.run(dry_run=True, vault=vault, fetcher=fake_site(toto, fourd), now=NOW, out=lambda s: None)
+    assert vault.load_state()["unposted_settled"] == ["abc"]
+
+
+def test_next_draw_pages_not_updated_yet_are_warned_about(seeded, toto, fourd, no_send):
+    # Both next draw pages still show the draws just held (TOTO Thu 1 Oct, 4D Wed 30 Sep).
+    site = fake_site(toto, fourd,
+                     next_toto=NextToto(draw_datetime=datetime(2026, 10, 1, 18, 30, tzinfo=SG),
+                                        jackpot_estimate=1_000_000.0, draw_type="normal", draw_type_hint=None),
+                     next_fourd=NextFourD(draw_datetime=datetime(2026, 9, 30, 18, 30, tzinfo=SG)))
+    result = runner.run(dry_run=True, vault=seeded, fetcher=site, now=NOW, out=lambda s: None)
+    assert ("The next TOTO draw page has not been updated yet (it still shows the draw on Thu 1 Oct 2026), "
+            "so the next jackpot is not known." in result.warnings)
+    assert any(w.startswith("The next 4D draw page has not been updated yet (it still shows the draw on "
+                            "Wed 30 Sep 2026)") for w in result.warnings)
+    assert not any("may be out of date" in w for w in result.warnings)
+
+
+def test_checked_tickets_are_recorded_before_the_ledger_is_saved(seeded, toto, fourd, tg, monkeypatch):
+    # If the container is stopped right after ledger.csv is written, state.json already says
+    # which tickets were checked but not posted, so the catch up run still posts them.
+    from huatbot import store
+
+    vault = seeded
+    assert runner.run(vault=vault, fetcher=fake_site(toto, fourd), now=NOW, out=lambda s: None).posted
+    on_disk: list = []
+    real = store.save_ledger
+
+    def spy(df, path):
+        on_disk.append(vault.load_state().get("unposted_settled"))
+        return real(df, path)
+    monkeypatch.setattr(store, "save_ledger", spy)
+    monday = datetime(2026, 10, 5, 19, 45, tzinfo=SG)
+    assert runner.run(("toto",), vault=vault, fetcher=fake_site(toto_151(), fourd), now=monday,
+                      out=lambda s: None).posted
+    assert on_disk and len(on_disk[0]) == 2
+    assert "unposted_settled" not in vault.load_state()
+
+
+def test_backtest_cache_key_changes_when_a_stored_draw_is_completed():
+    df = synth_toto(n_draws=120)
+    settings, rules = Settings(), PrizeRules()
+    before = runner._backtest_key("toto", df, settings, rules)
+    assert runner._backtest_key("toto", df.copy(), settings, rules) == before  # stable
+    fixed = df.copy()
+    fixed.loc[fixed.index[-1], "g3_share"] = float(fixed.loc[fixed.index[-1], "g3_share"]) + 1
+    assert runner._backtest_key("toto", fixed, settings, rules) != before
+    refetched = df.copy()
+    refetched["fetched_at"] = "later"
+    assert runner._backtest_key("toto", refetched, settings, rules) == before  # fetch time ignored
+
+
+def test_completed_draw_gets_its_note_rewritten(tmp_path):
+    from huatbot import notes
+    vault = Vault(tmp_path / "vault")
+    df = synth_toto(n_draws=10)
+    row = df.iloc[-1].copy()
+    incomplete = row.copy()
+    for g in range(1, 8):
+        incomplete[f"g{g}_share"] = float("nan")
+        incomplete[f"g{g}_winners"] = 0
+    rel, fm, body = notes.toto_draw_note(incomplete)
+    vault.write_note(rel, body, fm)
+    before = vault.read_text(rel)
+    rows = []
+    data = runner._Data(toto=df, fourd=pd.DataFrame(), repaired={"toto": [int(row["draw_number"])]})
+    runner._rewrite_repaired_notes(vault, data, lambda event, text: rows.append((event, text)))
+    after = vault.read_text(rel)
+    assert after != before
+    assert rows and rows[0][0] == "NOTE" and "complete result" in rows[0][1]
+    # A draw without a note is left alone (notes for old draws are not created here).
+    data.repaired = {"toto": [int(df.iloc[0]["draw_number"])]}
+    rows.clear()
+    runner._rewrite_repaired_notes(vault, data, lambda event, text: rows.append((event, text)))
+    assert rows == []

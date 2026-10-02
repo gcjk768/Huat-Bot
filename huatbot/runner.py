@@ -37,6 +37,11 @@ state.json keys written here:
                     429 or 5xx, only for a page that is gone or cannot be read); the lists
                     can also be edited by hand.
 ``fetch_failures``  failed runs per draw, feeding ``skip``
+``unposted_settled`` ticket ids checked by a run that posts, saved before ledger.csv, until a
+                    message 1 listing them went out: a failed post, or a run cut off after the
+                    ledger was saved, still reports them in the next message 1
+``last_logged``     short hashes of the last SUGGEST and SIGNAL rows, so an unchanged
+                    suggestion or signal is not logged again on every run
 ``last_run``        when, which games, ok, new draws, dry run or demo
 
 ``demo=True`` uses synthetic history from ``huatbot.synth`` (no network, never posts) and
@@ -118,7 +123,6 @@ LEDGER_LOG_LIMIT = 20  # settled tickets logged one by one
 SKIP_AFTER_FAILED_RUNS = 3  # a draw page failing in this many runs goes on the skip list
 SKIP_PROTECT_NEWEST = 10  # ... unless it is one of the newest draws on the site
 PRIZE_RULES_MAX_AGE_DAYS = 7
-PRIZE_RULES_CACHE_NAME = "prize_rules.json"
 BACKTEST_CACHE_VERSION = 1
 
 # Demo history: about as long as needed for a 300 draw backtest with 100 draws of warm up.
@@ -468,17 +472,24 @@ def _cached_rules(vault: Vault):
     return prize_rules.load_prize_rules(None)
 
 
-def _rules_text(rules, now: datetime) -> str:
-    """FETCH row for the prize rules: checked this run, reused from the cache, or built in."""
+# prize_rules.load_prize_rules says this in source_note for each page it parsed in this run.
+_RULES_CONFIRMED_NOW = "confirmed from the official page"
+
+
+def _rules_text(rules, now: datetime) -> str | None:
+    """FETCH row for the prize rules: the official pages were checked this run, could not be
+    read this run, or built in values. None when they were reused from the cache unchanged
+    (nothing new to log)."""
     checked = _parse_dt(getattr(rules, "checked_at", None))
     note = _plain(getattr(rules, "source_note", "") or "")
     if checked is None:
         head = "Prize rules: built in values"
-    elif rules.checked_at == now.isoformat(timespec="seconds"):
+    elif rules.checked_at != now.isoformat(timespec="seconds"):
+        return None  # reused from Data/prize_rules.json, checked again after PRIZE_RULES_MAX_AGE_DAYS
+    elif _RULES_CONFIRMED_NOW in note:
         head = "Prize rules: the official prize pages were checked this run"
     else:
-        head = (f"Prize rules: reused Data/{PRIZE_RULES_CACHE_NAME} from {fmt_datetime(checked)} "
-                f"(checked again after {plural(PRIZE_RULES_MAX_AGE_DAYS, 'day')})")
+        head = "Prize rules: the official prize pages could not be read this run"
     return f"{head}. {note}".strip()
 
 
@@ -498,7 +509,26 @@ class _Data:
     toto: pd.DataFrame  # everything stored
     fourd: pd.DataFrame
     new_draws: dict[str, list[int]] = field(default_factory=dict)
+    repaired: dict[str, list[int]] = field(default_factory=dict)  # stored draws completed this run
     problems: dict[str, str] = field(default_factory=dict)  # game -> why the site could not be used
+
+
+def _rewrite_repaired_notes(vault: Vault, data: _Data, activity: _Activity) -> None:
+    """Rewrite the draw note of a stored draw that was incomplete and got completed this run,
+    so its note shows the winning shares (or all 23 numbers). Only notes that exist are touched."""
+    for game, numbers in data.repaired.items():
+        df = data.toto if game == "toto" else data.fourd
+        make = notes.toto_draw_note if game == "toto" else notes.fourd_draw_note
+        for n in numbers:
+            rows = df[df["draw_number"] == int(n)]
+            if rows.empty:
+                continue
+            try:
+                rel, fm, body = make(rows.iloc[-1])
+                if vault.path(rel).exists() and vault.write_note(rel, body, fm):
+                    activity(EV_NOTE, f"Updated {_link(rel)} with the complete result")
+            except Exception as exc:  # a note is never worth failing the run
+                log.warning("Could not rewrite the note for %s draw %s: %s", LABELS[game], n, exc)
 
 
 def _save_frame(game: str, df: pd.DataFrame, old: pd.DataFrame, vault: Vault, warnings: list[str],
@@ -627,6 +657,7 @@ def _update_from_site(vault: Vault, settings: Settings, state: dict, games: tupl
         _save_frame(game, df, old, vault, warnings, activity)
         _log_new_draws(game, df, result.new_draws, activity)
         data.new_draws[game] = list(result.new_draws)
+        data.repaired[game] = list(getattr(result, "repaired_draws", []) or [])
         if game == "toto":
             data.toto = df
         else:
@@ -832,7 +863,16 @@ def _backtest_key(game: str, df: pd.DataFrame, settings: Settings, rules) -> dic
         "backtest_draws": int(settings.backtest_draws),
         "random_sets_per_draw": int(settings.random_sets_per_draw),
         "rules": _rules_fingerprint(rules),
+        "data": _data_fingerprint(df),
     }
+
+
+def _data_fingerprint(df: pd.DataFrame) -> str:
+    """Hash of the stored results (not fetch times), so a draw completed or retagged after it
+    was first stored makes the cached backtest stale even when the latest draw is the same."""
+    cols = [c for c in df.columns if c != "fetched_at"]
+    digest = pd.util.hash_pandas_object(df[cols].astype(str), index=False).to_numpy()
+    return hashlib.sha1(digest.tobytes()).hexdigest()[:16]
 
 
 def _read_backtest_cache(vault: Vault) -> dict:
@@ -860,9 +900,7 @@ def run_backtests(ctx: Context, vault: Vault, activity: _Activity | None = None)
         result = None
         if isinstance(entry, dict) and entry.get("key") == key:
             try:
-                result = backtest.result_from_dict(entry["result"])
-                if activity:
-                    activity(EV_BACKTEST, f"{LABELS[game]} backtest reused from the cache (draw {key['latest_draw']})")
+                result = backtest.result_from_dict(entry["result"])  # reused: nothing new to log
             except Exception as exc:
                 log.warning("Cached %s backtest could not be read: %s", LABELS[game], exc)
                 result = None
@@ -899,22 +937,27 @@ def run_backtests(ctx: Context, vault: Vault, activity: _Activity | None = None)
 
 
 def check_tickets(ctx: Context, vault: Vault, toto_all: pd.DataFrame, fourd_all: pd.DataFrame, *,
-                  save: bool = True, activity: _Activity | None = None) -> None:
+                  save: bool = True, activity: _Activity | None = None,
+                  on_settled: Callable[[list[dict]], Any] | None = None) -> None:
     """Read Tickets.md, sync and settle the ledger against every stored draw, save ledger.csv.
 
     Sets ctx.ledger, ctx.ledger_totals, ctx.settled_this_run and ctx.bad_ticket_lines.
+    ``on_settled(rows)`` is called with the rows settled in this run before ledger.csv is
+    written (only when there are some), so the caller can record them first.
     """
     text = vault.read_text(TICKETS_NOTE) or ""
     parsed = tickets.parse_tickets(text)
     bad = [t for t in parsed if t.error]
     old = store.load_ledger(vault.ledger_csv)
-    ledger = tickets.sync_ledger(old, parsed, ctx.now)
+    ledger = tickets.sync_ledger(old, parsed, ctx.now, note_read=tickets.has_ticket_table(text))
     added = len(ledger) - len(old)
     ledger, settled = tickets.settle_ledger(ledger, toto_all, fourd_all, ctx.rules, ctx.now)
     ctx.ledger = ledger
     ctx.ledger_totals = tickets.ledger_totals(ledger)
     ctx.settled_this_run = settled
     ctx.bad_ticket_lines = bad
+    if on_settled is not None and settled:
+        on_settled(settled)
 
     if save and not (len(ledger) == len(old) and store.normalise_ledger(ledger).equals(store.normalise_ledger(old))):
         try:
@@ -948,7 +991,23 @@ def check_tickets(ctx: Context, vault: Vault, toto_all: pd.DataFrame, fourd_all:
 # Step 6 helpers
 
 
-def _log_suggestions(ctx: Context, activity: _Activity) -> None:
+def _log_changed(activity: _Activity, state: dict | None, event: str, key: str, message: str) -> None:
+    """Log the row unless the row last logged under ``key`` (state["last_logged"]) said exactly
+    the same, so an unchanged suggestion or signal is not repeated on every run."""
+    if state is None:
+        activity(event, message)
+        return
+    digest = hashlib.sha1(message.encode("utf-8")).hexdigest()[:12]
+    seen = state.get("last_logged") if isinstance(state.get("last_logged"), dict) else {}
+    if seen.get(key) == digest:
+        return
+    activity(event, message)
+    state["last_logged"] = {**seen, key: digest}
+
+
+def _log_suggestions(ctx: Context, activity: _Activity, state: dict | None = None) -> None:
+    """SUGGEST rows for the plans and a SIGNAL row for the buy signal. With ``state``, only the
+    rows that changed since they were last logged (a new draw changes them)."""
     for plan, game in ((ctx.toto_plan, "toto"), (ctx.fourd_plan, "4d")):
         if plan is None:
             continue
@@ -956,16 +1015,17 @@ def _log_suggestions(ctx: Context, activity: _Activity) -> None:
         draw = f" draw {nd.number}" if nd.number else ""
         if plan.lines:
             picks = ", ".join(f"{ln.label} {ln.numbers}" for ln in plan.lines)
-            activity(EV_SUGGEST, f"{LABELS[game]}{draw}: {picks}; total {money(plan.total)} of the "
-                                 f"{money(plan.budget)} budget")
+            text = (f"{LABELS[game]}{draw}: {picks}; total {money(plan.total)} of the "
+                    f"{money(plan.budget)} budget")
         else:
-            activity(EV_SUGGEST, f"{LABELS[game]}{draw}: nothing to buy ({_plain(' '.join(plan.notes[:1]))})")
+            text = f"{LABELS[game]}{draw}: nothing to buy ({_plain(' '.join(plan.notes[:1]))})"
+        _log_changed(activity, state, EV_SUGGEST, f"{EV_SUGGEST} {game}", text)
     sig = ctx.buy_signal
     if sig is not None:
         jackpot = money(sig.jackpot) if sig.jackpot is not None else "not known"
         ev = f", return per $1 about {per_dollar(sig.ev_per_dollar)}" if sig.ev_per_dollar is not None else ""
-        activity(EV_SIGNAL, f"Buy signal {sig.label} for the next TOTO draw: jackpot {jackpot}, "
-                            f"{sig.draw_type} draw{ev}")
+        _log_changed(activity, state, EV_SIGNAL, EV_SIGNAL, f"Buy signal {sig.label} for the next TOTO draw: "
+                                                            f"jackpot {jackpot}, {sig.draw_type} draw{ev}")
 
 
 def _commentary(ctx: Context, demo: bool, activity: _Activity | None = None) -> str | None:
@@ -1042,6 +1102,9 @@ def _deliver(messages: list[str], ctx: Context, state: dict, *, dry_run: bool, p
 
     def sent(i: int) -> None:
         state["posting"] = {"draws": draws, "sent": done + i, "total": len(messages)}
+        if done == 0:
+            # Message 1 of this run, which lists the tickets checked but not posted yet, went out.
+            state.pop("unposted_settled", None)
         if vault is not None:
             try:
                 vault.save_state(state)
@@ -1152,9 +1215,13 @@ def run(games=GAMES, *, dry_run: bool = False, fetch: bool = True, post: bool = 
             if not token or not chat_id:
                 msg = ("Telegram is not set up (TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID is missing), so this is a "
                        "dry run: the messages are printed, not posted.")
-                if Path(".env").is_file():
-                    msg += (" A .env file is in the working folder, but only docker compose reads it: "
-                            "outside Docker, export its values first (see the README).")
+                env_file = (os.environ.get("ENV_FILE") or "").strip()
+                if Path(env_file or ".env").is_file():
+                    # The CLI reads this file (cli.load_dotenv), so it gave no usable value.
+                    name = "The ENV_FILE settings file" if env_file else "The .env file in the working folder"
+                    msg += (f" {name} has no TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID value the bot could use: "
+                            "fill in both there (a value already set in the shell, even an empty one, wins "
+                            "over the file).")
                 warnings.append(msg)
                 log.warning(msg)
                 activity(EV_DRY_RUN, "Telegram is not set up, treating this run as a dry run")
@@ -1171,7 +1238,9 @@ def run(games=GAMES, *, dry_run: bool = False, fetch: bool = True, post: bool = 
                     fetcher = own_fetcher = Fetcher()
                 rules = prize_rules.load_prize_rules(fetcher, cache_path=vault.prize_rules_path,
                                                      max_age_days=PRIZE_RULES_MAX_AGE_DAYS, now=now)
-                activity(EV_FETCH, _rules_text(rules, now))
+                rules_row = _rules_text(rules, now)
+                if rules_row:
+                    activity(EV_FETCH, rules_row)
                 data = _update_from_site(vault, settings, state, games, fetcher, now, activity, warnings)
             else:
                 rules = _cached_rules(vault)
@@ -1206,10 +1275,14 @@ def run(games=GAMES, *, dry_run: bool = False, fetch: bool = True, post: bool = 
                 activity(EV_FETCH, f"Next draws: {_next_draws_text(nt, nf)}")
             stored_nt, stored_nf = next_draws_from_state(state, data.toto, data.fourd)
             nt, nf = nt or stored_nt, nf or stored_nf
-            last_toto = _latest_date(data.toto)
+            last_toto, last_fourd = _latest_date(data.toto), _latest_date(data.fourd)
             if nt is not None and nt.draw_datetime is not None and last_toto and nt.draw_datetime.date() <= last_toto:
-                warnings.append(f"The next TOTO draw page still shows the draw on {fmt_date(nt.draw_datetime)}, "
-                                "so the jackpot estimate may be out of date.")
+                warnings.append(f"The next TOTO draw page has not been updated yet (it still shows the draw on "
+                                f"{fmt_date(nt.draw_datetime)}), so the next jackpot is not known.")
+            if nf is not None and nf.draw_datetime is not None and last_fourd and nf.draw_datetime.date() <= last_fourd:
+                warnings.append(f"The next 4D draw page has not been updated yet (it still shows the draw on "
+                                f"{fmt_date(nf.draw_datetime)}), so the next 4D draw date is taken from the "
+                                "regular draw days.")
         if demo:
             _store_next_draws(state, nt, nf, now)
 
@@ -1221,7 +1294,7 @@ def run(games=GAMES, *, dry_run: bool = False, fetch: bool = True, post: bool = 
         warnings = ctx.warnings  # one list from here on, so later steps add to the report too
         for w in warnings[known:]:  # analysis parts that failed (each is already a warning)
             activity(EV_ERROR, _plain(w).rstrip("."))
-        _log_suggestions(ctx, activity)
+        _log_suggestions(ctx, activity, state)
 
         # 4 backtests
         run_backtests(ctx, vault, activity)
@@ -1230,7 +1303,29 @@ def run(games=GAMES, *, dry_run: bool = False, fetch: bool = True, post: bool = 
         if demo:
             for rel in vault.ensure_layout({TICKETS_NOTE: demo_tickets_note(data.toto, data.fourd, nt)}):
                 activity(EV_NOTE, f"Created {_link(rel)} with demo tickets")
-        check_tickets(ctx, vault, data.toto, data.fourd, save=True, activity=activity)
+        # A run that posts keeps the tickets it checked in state["unposted_settled"] until a
+        # message 1 listing them went out, saved before ledger.csv: after a failed post, or a run
+        # cut off once the ledger was saved, the next message 1 still lists them.
+        posting = post and not dry_run and not demo
+        unposted = state.get("unposted_settled")
+        carry = [str(x) for x in unposted] if posting and isinstance(unposted, list) else []
+
+        def remember_settled(rows: list[dict]) -> None:
+            ids = carry + [str(r["ticket_id"]) for r in rows if str(r.get("ticket_id")) not in carry]
+            if ids == carry:
+                return
+            state["unposted_settled"] = ids
+            try:
+                vault.save_state(state)
+            except Exception as exc:  # the final save in finally tries again
+                log.warning("state.json could not be saved before the ledger: %s", exc)
+
+        check_tickets(ctx, vault, data.toto, data.fourd, save=True, activity=activity,
+                      on_settled=remember_settled if posting else None)
+        if carry:
+            have = {str(r.get("ticket_id")) for r in ctx.settled_this_run}
+            earlier = [r for r in tickets.settled_rows(ctx.ledger, carry) if str(r["ticket_id"]) not in have]
+            ctx.settled_this_run = earlier + list(ctx.settled_this_run)
 
         # 6 commentary, report, notes, state
         ctx.commentary = _commentary(ctx, demo, activity)
@@ -1238,6 +1333,7 @@ def run(games=GAMES, *, dry_run: bool = False, fetch: bool = True, post: bool = 
             activity(EV_NOTE, "Added a short commentary written from the computed figures")
         report_md = report.full_report(ctx)
         notes.write_all(vault, ctx, report_md)
+        _rewrite_repaired_notes(vault, data, activity)
         result.report_path = str(vault.path(notes.report_note_path(ctx.now)))
         messages = report.telegram_messages(ctx)
         result.messages = messages
