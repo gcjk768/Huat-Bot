@@ -89,7 +89,7 @@ def test_next_draw_page_still_showing_the_draw_just_held(vault_path):
     assert msg2.startswith("🔮 <b>NEXT TOTO DRAW</b> · Mon 5 Oct 2026, 6.30pm (regular schedule, not announced yet)\n")
     expected = outlook.estimate_next_jackpot(history, PrizeRules())
     assert f"<b>Jackpot {money(expected)}</b> <i>(worked out from past results)</i>" in msg2
-    assert "Buy signal <b>" in msg2 and "<b>NEXT BIG PRIZE</b>" in msg2
+    assert "<b>Buy signal " in msg2 and "<b>NEXT BIG PRIZE</b>" in msg2
     assert any("still shows the draw on Thu 1 Oct 2026" in w for w in result.warnings)
     report_text = (vault_path / "Huat Bot" / "Reports" / "2026" / "10" / "2026-10-01 1945 Report.md").read_text(encoding="utf-8")
     assert "$5,000,000" not in report_text
@@ -189,7 +189,7 @@ def test_old_fourd_state_and_ledger_are_handled(vault_path):
         "2026-09-26T19:30:00+08:00,| 4D | 26 Sep 2026 | 1234 | Big | $1 |\n", encoding="utf-8")
     result = _run(vault_path, fake_site(toto_history(N_DRAWS)), _at(2026, 10, 1))
     msg1, msg2 = result.messages
-    assert "All tickets so far: spent $1, won $2,000, net <b>$1,999</b>." in msg1
+    assert "<b>All tickets so far</b> · spent $1 · won $2,000\n💰 Net <b>$1,999</b>" in msg1
     for msg in result.messages:
         assert forbidden_mentions(msg) == []
     saved = json.loads((data / "state.json").read_text(encoding="utf-8"))

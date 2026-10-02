@@ -228,7 +228,7 @@ def test_figures_agree_with_the_messages():
     nt, bs, out = figs["next_toto"], figs["buy_signal"], figs["jackpot_outlook"]
     assert f"NEXT TOTO DRAW</b> · {nt['draw_time']}, draw 4124" in msg2
     assert f"<b>Jackpot {nt['estimated_jackpot']}</b>" in msg2
-    assert f"Buy signal <b>{bs['label']}</b>" in msg2
+    assert f"<b>Buy signal {bs['label']}</b>" in msg2
     assert f"<b>{bs['return_per_dollar']}</b> back per $1" in msg2
     assert out["jackpot_rollovers_so_far"] == 1 and out["draws_until_cascade"] == 3
     assert "rollovers 1 of 3, then it cascades" in msg2
@@ -238,7 +238,7 @@ def test_figures_agree_with_the_messages():
     assert f"Group 1 was won in {figs['jackpot_history']['share_of_draws_with_a_group_1_winner']} of draws" in msg2
     assert f"<b>Winning numbers</b> · <code>{figs['latest_toto']['numbers']}</code>" in msg1
     assert figs["my_tickets"] == {"tickets": 4, "spent": "$10", "won": "$10", "net": "$0"}
-    assert "spent $10, won $10, net <b>$0</b>" in msg1
+    assert "spent $10 · won $10" in msg1
 
 
 def test_figures_with_the_jackpot_worked_out_from_past_results():

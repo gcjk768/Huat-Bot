@@ -11,7 +11,7 @@ Python 3.12, Docker (`docker-compose.yml`, `pull_policy: build`). Runs `python -
 - [[huatbot/runner.py]] — one run: fetch → tickets → outlook → notes → Telegram. Saves the messages for `/huat`.
 - [[huatbot/fetch.py]], [[huatbot/parse.py]], [[huatbot/http.py]] — Singapore Pools pages, rate limited.
 - [[huatbot/outlook.py]], [[huatbot/buysignal.py]], [[huatbot/sales.py]] — jackpot projection, return per $1.
-- [[huatbot/report.py]] — full report + 2 Telegram cards (fleet style: `SECTION_TITLES`, divider, expandable blockquote).
+- [[huatbot/report.py]] — full report + 2 Telegram cards in the SG car tracker block style (`SECTION_TITLES`, one block per item, no `<pre>` tables, divider, notes last in an expandable blockquote).
 - [[huatbot/telegram.py]] — sendMessage (forum topic via `chat/-topic`), getUpdates, answerCallbackQuery.
 - [[huatbot/listener.py]] — `/huat`, `/huatnext`, `/huathelp` + 🔄/🔮 buttons; own topic only; whitelisted callbacks; no fetch or LLM.
 - [[huatbot/watch.py]] — hourly next draw page check within `ALERT_HOURS` (9-21), 🆕 card on jackpot estimate change or special draw; snapshot in `Data/watch.json`.

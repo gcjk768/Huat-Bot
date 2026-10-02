@@ -5,6 +5,7 @@ updated: 2026-10-03
 # Changelog
 
 ## 2026-10-03
+- Telegram cards now match the SG car tracker (@owner_sgcar_bot): no `<pre>` tables; one line per prize group (🏆/🥈/🥉/🎟), one block per ticket (🟢/⚪ + 💰/🎯 line), projection as 📅/🌊 lines, 🌐 Singapore Pools result link; buy-signal reason, return per $1, sales method and legend moved into the closing expandable quote.
 - Telegram cards in the fleet style (emoji titles, ━ dividers, 🟢/🟡/🔴 buy signal, 🟢▲/🔴▼ jackpot change, odds + history + commentary in an expandable blockquote).
 - Forum topic support (`-100…/topic` or `TELEGRAM_THREAD_ID`); inline buttons on the last message.
 - New command listener: `/huat`, `/huatnext`, `/huathelp`.
