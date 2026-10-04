@@ -126,7 +126,7 @@ def watch(vault, fetcher, stop: threading.Event | None = None, interval: float =
 
 
 def start(vault, fetcher) -> threading.Thread:
-    minutes = float(os.environ.get("WATCH_MINUTES") or 60)
+    minutes = float(os.environ.get("WATCH_MINUTES") or 1440)
     t = threading.Thread(target=watch, args=(vault, fetcher), kwargs={"interval": max(15.0, minutes) * 60},
                          name="finding-watcher", daemon=True)
     t.start()
