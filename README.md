@@ -69,8 +69,9 @@ keeps everything it reads and writes inside your Obsidian vault.
 | Vault | Writes a dashboard, the ledger, a note per draw, a full report per run and an activity log, all in your Obsidian vault. |
 | Telegram | Posts two messages: 1) the latest result and your ticket check, 2) the next draw, its jackpot and buy signal, and the next big prize. Each stays under 4,000 characters. A draw is never posted twice. |
 
-What it does not do: it never suggests numbers to pick. Every draw is independent and every set of
-six numbers has exactly the same chance, so "hot", "cold" or "overdue" numbers are not a thing.
+The only numbers it offers are a **just for fun** lucky set in message 2 (`huatbot/lucky.py`), weighted by
+how often each number came up before. Every draw is independent and every set of six numbers has exactly
+the same chance, so it gives no edge.
 
 Message 2 looks like this (from the demo):
 

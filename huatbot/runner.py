@@ -8,7 +8,7 @@ monthly activity log, which gets a row for every meaningful action (RUN, SETTING
 NEW DRAW, TICKETS, LEDGER, SIGNAL, NOTE, POST, DRY RUN, ERROR; the scheduler adds SCHEDULE and
 WAIT).
 
-The bot never suggests numbers: every draw is independent, so no pattern in past results makes a
+Message 2 carries a just for fun lucky set (``lucky``), but every draw is independent, so no pattern in past results makes a
 set of numbers more likely. It reports the result, what the next draws are likely to do and where
 the next big prize is (``outlook``), and how much each $1 returns on average (``buysignal``).
 

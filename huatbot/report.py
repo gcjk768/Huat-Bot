@@ -11,7 +11,7 @@ ledger); this module only lays it out. House style:
 * The markdown report has no dashes in prose (tables, frontmatter and [[wikilinks]] may carry
   hyphens) and uses the section headings in ``SECTION_HEADINGS``, in that order.
 
-The bot never suggests numbers: every draw is independent. It reports the latest result, checks
+Every draw is independent, so the one set of lucky numbers in message 2 is just for fun. It reports the latest result, checks
 the user's tickets, and says what the next draws are likely to do with the jackpot.
 
 A few view helpers live here because ``notes`` shares them: ``latest_row``, ``next_draw``, the
@@ -33,6 +33,7 @@ import pandas as pd
 from . import constants as C
 from . import tickets as ticket_ledger
 from .models import Context, JackpotHistory, JackpotOutlook, PrizeRules
+from .lucky import lucky_pick
 from .outlook import chance_won_by_cascade
 from .parse import sppl
 from .store import no_winner_streak, toto_numbers
@@ -85,7 +86,7 @@ _TG_MORE = "<i>More detail is in the report note in the vault.</i>"
 DIVIDER = "━━━━━━━━━━━━━━━━"
 # One fixed emoji per Telegram section title.
 SECTION_TITLES = {
-    "result": "🎱", "winner": "🎉", "tickets": "🎫", "next": "🔮", "big": "💎", "more": "📜",
+    "result": "🎱", "winner": "🎉", "tickets": "🎫", "next": "🔮", "big": "💎", "more": "📜", "lucky": "🍀",
 }
 SIGNAL_MARKERS = {"HIGH": "🟢", "MEDIUM": "🟡", "LOW": "🔴"}
 GROUP_EMOJI = {2: "🥈", 3: "🥉"}  # Group 1 is 🏆, the rest 🎟
@@ -1092,11 +1093,28 @@ def _tg_big_prize(ctx: Context, level: int) -> str | None:
     return _tg_join(blocks)
 
 
+def _tg_lucky(ctx: Context) -> str | None:
+    """`🍀 LUCKY NUMBERS` for the next draw, just for fun: past frequency, no edge at all."""
+    nd = next_draw(ctx)
+    pick = lucky_pick(ctx.toto, nd.number or 0) if not nd.held else None
+    if pick is None:
+        return None
+    nums, hot = pick
+    return _tg_join([
+        title("lucky", "Lucky numbers", "just for fun"),
+        f"🎰 <code>{toto_nums(nums)}</code>\n🔥 Most drawn so far: {toto_nums(hot)}\n"
+        "<i>Built from how often each number came up before. It gives no edge.</i>",
+    ])
+
+
 def _tg_message2(ctx: Context, level: int) -> list[str]:
     blocks = _tg_next_draw(ctx, level)
     big = _tg_big_prize(ctx, level)
     if big:
         blocks += [DIVIDER, big]
+    lucky = _tg_lucky(ctx) if level < 4 else None
+    if lucky:
+        blocks += [DIVIDER, lucky]
     more = _tg_signal_notes(ctx, level)
     out = ctx.outlook
     if out is not None and len(out.steps) > 1 and level < 4:

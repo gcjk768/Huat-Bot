@@ -189,10 +189,20 @@ def test_telegram_messages_are_two_valid_html_messages(name, scenarios):
 
 
 @pytest.mark.parametrize("name", SCENARIOS)
-def test_message2_never_carries_a_set_of_six_numbers(name, scenarios):
-    # The third message used to hold suggested sets; message 2 must hold none at all.
+def test_message2_carries_at_most_the_one_lucky_set(name, scenarios):
     msg = report.telegram_messages(scenarios[name])[1]
-    assert not re.search(r"(?<![\d,.$])\d{1,2}(?: \d{1,2}){5}(?![\d,.])", msg)
+    sets = re.findall(r"(?<![\d,.$])\d{1,2}(?: \d{1,2}){5}(?![\d,.])", msg)
+    assert len(sets) <= 1
+    assert bool(sets) == ("LUCKY NUMBERS" in msg)
+
+
+def test_lucky_pick_is_six_distinct_numbers_and_stable_per_draw(toto_df):
+    from huatbot.lucky import lucky_pick
+    nums, hot = lucky_pick(toto_df, 4000)
+    assert len(set(nums)) == 6 and all(1 <= n <= 49 for n in nums) and len(hot) == 3
+    assert lucky_pick(toto_df, 4000) == (nums, hot)
+    assert lucky_pick(toto_df, 4001)[0] != nums
+    assert lucky_pick(toto_df.iloc[0:0], 1) is None
 
 
 # Message 1: headline, latest result, my tickets
@@ -371,7 +381,7 @@ def test_message2_next_draw_block(ctx):
 
 def test_message2_order_of_blocks(ctx):
     msg = report.telegram_messages(ctx)[1]
-    order = ["<b>NEXT TOTO DRAW</b>", "<b>NEXT BIG PRIZE</b>", "Over 260 stored draws", "⚖️ Every draw is independent."]
+    order = ["<b>NEXT TOTO DRAW</b>", "<b>NEXT BIG PRIZE</b>", "<b>LUCKY NUMBERS</b>", "Over 260 stored draws", "⚖️ Every draw is independent."]
     positions = [msg.index(s) for s in order]
     assert positions == sorted(positions)
     assert msg.count("independent") == 1
@@ -542,7 +552,7 @@ def _long_commentary(n: int) -> str:
     return (sentence * (n // len(sentence) + 1))[:n].rsplit(" ", 1)[0] + "."
 
 
-@pytest.mark.parametrize("length,level", [(2000, 0), (2700, 2), (2850, 3), (3200, 4)])
+@pytest.mark.parametrize("length,level", [(2000, 0), (2500, 2), (2650, 3), (3200, 4)])
 def test_message2_drops_detail_level_by_level(ctx, length, level):
     c = variant(ctx, commentary=_long_commentary(length))
     msg = report.telegram_messages(c)[1]
