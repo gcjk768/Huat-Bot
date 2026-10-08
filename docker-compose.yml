@@ -9,6 +9,7 @@
 
 services:
   huat-bot:
+    networks: [default, scrape-net]   # shared Playwright server ws://playwright:3000/
     build:
       context: .
       args:
@@ -33,3 +34,7 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+networks:
+  scrape-net:
+    external: true
