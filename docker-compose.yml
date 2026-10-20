@@ -24,11 +24,13 @@ services:
     init: true
     env_file: .env
     environment:
+      PATH: "/fb:/usr/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
       PLAYWRIGHT_WS_URL: ws://playwright:3000/
       TZ: Asia/Singapore
       VAULT_PATH: /vault
     user: "${PUID:-1000}:${PGID:-10}"
     volumes:
+      - /volume1/docker/claude-fallback:/fb:ro   # claude -p fallback wrapper (API key -> subscription); /fb is first on PATH
       - "${VAULT_HOST_PATH:?Set VAULT_HOST_PATH in .env to your Obsidian vault folder on the NAS}:/vault"
     logging:
       driver: json-file
