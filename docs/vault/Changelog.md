@@ -1,8 +1,11 @@
 ---
 tags: [active]
-updated: 2026-10-03
+updated: 2026-11-09
 ---
 # Changelog
+
+## 2026-11-09
+- 🛒 HOW MUCH TO BUY block in message 2, after the buy signal: new setting `max_spend_per_draw` (default $10, 0 hides it). HIGH spends all of it, MEDIUM half, LOW one $1 board; the biggest System bet that fits goes first, the rest are Ordinary boards (`buysignal.how_much_to_buy`). Shows the 1 in N jackpot chance for that many boards. The 🍀 lucky set is sized to that System bet (e.g. 8 numbers for a System 8). Deployed to the NAS.
 
 ## 2026-10-03
 - Telegram cards now match the SG car tracker (@owner_sgcar_bot): no `<pre>` tables; one line per prize group (🏆/🥈/🥉/🎟), one block per ticket (🟢/⚪ + 💰/🎯 line), projection as 📅/🌊 lines, 🌐 Singapore Pools result link; buy-signal reason, return per $1, sales method and legend moved into the closing expandable quote.
