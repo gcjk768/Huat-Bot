@@ -240,3 +240,14 @@ def test_an_average_above_one_dollar_carries_a_caveat(toto_df, settings, rules):
     normal = B.buy_signal(nxt(2_100_000.0), toto_df, settings, rules)
     assert normal.ev_per_dollar < 1
     assert "almost every ticket still loses" not in normal.reason
+
+
+def test_how_much_to_buy_follows_the_signal_and_the_cap():
+    from huatbot.buysignal import how_much_to_buy
+    assert how_much_to_buy("HIGH", 10) == (10, 7, 3)    # System 7 ($7) + 3 Ordinary
+    assert how_much_to_buy("MEDIUM", 10) == (5, None, 5)
+    assert how_much_to_buy("LOW", 10) == (1, None, 1)
+    assert how_much_to_buy("HIGH", 100) == (100, 9, 16)  # System 9 is 84 boards
+    assert how_much_to_buy("HIGH", 5000) == (5000, 12, 4076)
+    assert how_much_to_buy("HIGH", 0) == (0, None, 0)
+    assert how_much_to_buy(None, 10) == (5, None, 5)

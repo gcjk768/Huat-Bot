@@ -381,7 +381,7 @@ def test_message2_next_draw_block(ctx):
 
 def test_message2_order_of_blocks(ctx):
     msg = report.telegram_messages(ctx)[1]
-    order = ["<b>NEXT TOTO DRAW</b>", "<b>NEXT BIG PRIZE</b>", "<b>LUCKY NUMBERS</b>", "Over 260 stored draws", "⚖️ Every draw is independent."]
+    order = ["<b>NEXT TOTO DRAW</b>", "<b>HOW MUCH TO BUY</b>", "<b>NEXT BIG PRIZE</b>", "<b>LUCKY NUMBERS</b>", "Over 260 stored draws", "⚖️ Every draw is independent."]
     positions = [msg.index(s) for s in order]
     assert positions == sorted(positions)
     assert msg.count("independent") == 1
@@ -552,7 +552,7 @@ def _long_commentary(n: int) -> str:
     return (sentence * (n // len(sentence) + 1))[:n].rsplit(" ", 1)[0] + "."
 
 
-@pytest.mark.parametrize("length,level", [(2000, 0), (2500, 2), (2650, 3), (3200, 4)])
+@pytest.mark.parametrize("length,level", [(2000, 0), (2250, 2), (2400, 3), (3200, 4)])
 def test_message2_drops_detail_level_by_level(ctx, length, level):
     c = variant(ctx, commentary=_long_commentary(length))
     msg = report.telegram_messages(c)[1]

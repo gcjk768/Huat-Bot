@@ -15,8 +15,8 @@ RECENT = 100  # draws that count double, so the pick leans a little on the recen
 POOL = range(1, 50)
 
 
-def lucky_pick(df: pd.DataFrame, seed: int) -> tuple[list[int], list[int]] | None:
-    """(six numbers ascending, the three hottest numbers) from the stored draws, or None without history.
+def lucky_pick(df: pd.DataFrame, seed: int, size: int = 6) -> tuple[list[int], list[int]] | None:
+    """(``size`` numbers ascending, 6 or 7 to 12 for a System bet, the three hottest numbers) from the stored draws, or None without history.
 
     Weight = 1 + times drawn, recent draws counted twice. Sampling is seeded by the draw number,
     so the same draw always gets the same pick but each draw gets a new one.
@@ -29,7 +29,7 @@ def lucky_pick(df: pd.DataFrame, seed: int) -> tuple[list[int], list[int]] | Non
         counts.update(toto_numbers(r) * (2 if i >= len(rows) - RECENT else 1))
     weights = {n: 1 + counts[n] for n in POOL}
     rng, pick = random.Random(seed), []
-    while len(pick) < 6:  # weighted draw without replacement
+    while len(pick) < size:  # weighted draw without replacement
         n = rng.choices(list(weights), list(weights.values()))[0]
         pick.append(n)
         del weights[n]

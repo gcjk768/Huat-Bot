@@ -49,6 +49,10 @@ FIELD_SPECS: dict[str, FieldSpec] = {
     "draw_notes_backfill": FieldSpec(
         "int", 0, 5_000,
         "How many recent draws get their own note the first time the bot fills this vault."),
+    "max_spend_per_draw": FieldSpec(
+        "money", 0, 10_000,
+        "The most you want to spend on one draw. A HIGH buy signal spends all of it, MEDIUM half, LOW "
+        "one $1 board, as the biggest System bet that fits plus Ordinary boards. 0 turns this off."),
 }
 
 # Properties Obsidian and its plugins commonly add. They are allowed and silently ignored.

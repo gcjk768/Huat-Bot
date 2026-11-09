@@ -42,7 +42,8 @@ def _no_dashes(text: str) -> bool:
 
 def test_every_settings_field_has_a_spec():
     assert list(FIELD_SPECS) == SETTING_NAMES
-    assert SETTING_NAMES == ["jackpot_alert", "alert_on_special_draws", "toto_start_draw", "draw_notes_backfill"]
+    assert SETTING_NAMES == ["jackpot_alert", "alert_on_special_draws", "toto_start_draw", "draw_notes_backfill",
+                             "max_spend_per_draw"]
 
 
 def test_template_frontmatter_has_every_field_with_defaults():
@@ -59,7 +60,7 @@ def test_template_frontmatter_has_every_field_with_defaults():
 def test_template_frontmatter_is_block_style_yaml():
     assert SETTINGS_TEMPLATE.startswith(
         "---\njackpot_alert: 3000000\nalert_on_special_draws: true\n"
-        f"toto_start_draw: {C.TOTO_FIRST_CURRENT_FORMAT_DRAW}\ndraw_notes_backfill: 50\n---\n")
+        f"toto_start_draw: {C.TOTO_FIRST_CURRENT_FORMAT_DRAW}\ndraw_notes_backfill: 50\nmax_spend_per_draw: 10\n---\n")
 
 
 def test_template_help_is_plain_and_complete():

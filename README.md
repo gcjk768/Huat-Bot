@@ -421,8 +421,9 @@ default, and the problem is listed in the report.
 | `alert_on_special_draws` | true | true or false | Any cascade, Hongbao or special draw also makes the buy signal HIGH. |
 | `toto_start_draw` | 2995 | 2995 to 99999 | First draw kept in the history (2995 is the first 6 from 49 draw). |
 | `draw_notes_backfill` | 50 | 0 to 5,000 | How many recent draws get their own note the first time the vault is filled. |
+| `max_spend_per_draw` | 10 | 0 to 10,000 | The most to spend on one draw. Message 2 says how much to buy: all of it on a HIGH signal, half on MEDIUM, one $1 board on LOW, as the biggest System bet that fits plus Ordinary boards. 0 hides it. |
 
-Settings from the earlier version (budgets, 4D, backtests, System 7) are no longer used. If they are
+Settings from the earlier version (`toto_budget`, 4D, backtests, `offer_system7`) are no longer used. If they are
 still in your `Settings.md`, the report lists them once so you can delete them; they do no harm.
 
 ### In .env: environment variables

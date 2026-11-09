@@ -81,6 +81,7 @@ class Settings:
     alert_on_special_draws: bool = True  # cascade, Hongbao or special draws count as alerts
     toto_start_draw: int = C.TOTO_FIRST_CURRENT_FORMAT_DRAW
     draw_notes_backfill: int = 50  # how many recent draws get their own vault note on first run
+    max_spend_per_draw: float = 10.0  # most the bot tells you to spend on one draw (HIGH signal)
     warnings: list[str] = field(default_factory=list)  # problems found while reading settings
 
 

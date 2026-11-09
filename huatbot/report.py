@@ -33,6 +33,7 @@ import pandas as pd
 from . import constants as C
 from . import tickets as ticket_ledger
 from .models import Context, JackpotHistory, JackpotOutlook, PrizeRules
+from .buysignal import how_much_to_buy
 from .lucky import lucky_pick
 from .outlook import chance_won_by_cascade
 from .parse import sppl
@@ -86,7 +87,7 @@ _TG_MORE = "<i>More detail is in the report note in the vault.</i>"
 DIVIDER = "━━━━━━━━━━━━━━━━"
 # One fixed emoji per Telegram section title.
 SECTION_TITLES = {
-    "result": "🎱", "winner": "🎉", "tickets": "🎫", "next": "🔮", "big": "💎", "more": "📜", "lucky": "🍀",
+    "result": "🎱", "winner": "🎉", "tickets": "🎫", "next": "🔮", "big": "💎", "more": "📜", "lucky": "🍀", "buy": "🛒",
 }
 SIGNAL_MARKERS = {"HIGH": "🟢", "MEDIUM": "🟡", "LOW": "🔴"}
 GROUP_EMOJI = {2: "🥈", 3: "🥉"}  # Group 1 is 🏆, the rest 🎟
@@ -1093,22 +1094,55 @@ def _tg_big_prize(ctx: Context, level: int) -> str | None:
     return _tg_join(blocks)
 
 
+def _buy(ctx: Context) -> tuple[int, int | None, int]:
+    """(dollars, System n or None, Ordinary boards) for the next draw; (0, None, 0) when sales are closed."""
+    sig = toto_signal(ctx)
+    if next_draw(ctx).held or not sig["label"]:
+        return 0, None, 0
+    return how_much_to_buy(sig["label"], ctx.settings.max_spend_per_draw)
+
+
+def _tg_buy(ctx: Context) -> str | None:
+    """`🛒 HOW MUCH TO BUY`: the spend for this buy signal within max_spend_per_draw, as tickets."""
+    spend, system, ordinary = _buy(ctx)
+    if not spend:
+        return None
+    tickets = [f"1 System {system} ticket ({money(C.TOTO_SYSTEM_BOARDS[system])}, "
+               f"{C.TOTO_SYSTEM_BOARDS[system]} boards)"] if system else []
+    if ordinary:
+        tickets.append(f"{ordinary} Ordinary board{'s' if ordinary != 1 else ''} ({money(ordinary)})")
+    cap = money(ctx.settings.max_spend_per_draw)
+    return _tg_join([
+        title("buy", "How much to buy", f"up to {cap} a draw"),
+        f"💵 Spend <b>{money(spend)}</b> on this {_h(toto_signal(ctx)['label'])} signal\n"
+        f"🎫 {_h(' + '.join(tickets))}\n"
+        f"🎯 Jackpot chance about 1 in {C.TOTO_COMBOS // spend:,}\n"
+        "<i>Every $1 board has the same odds, System or Ordinary. Never spend more than this.</i>",
+    ])
+
+
 def _tg_lucky(ctx: Context) -> str | None:
-    """`🍀 LUCKY NUMBERS` for the next draw, just for fun: past frequency, no edge at all."""
+    """`🍀 LUCKY NUMBERS` for the next draw, just for fun: past frequency, no edge at all.
+    Sized for the System bet in `HOW MUCH TO BUY` when there is one."""
     nd = next_draw(ctx)
-    pick = lucky_pick(ctx.toto, nd.number or 0) if not nd.held else None
+    system = _buy(ctx)[1]
+    pick = lucky_pick(ctx.toto, nd.number or 0, system or 6) if not nd.held else None
     if pick is None:
         return None
     nums, hot = pick
+    label = f"For your System {system}: " if system else ""
     return _tg_join([
         title("lucky", "Lucky numbers", "just for fun"),
-        f"🎰 <code>{toto_nums(nums)}</code>\n🔥 Most drawn so far: {toto_nums(hot)}\n"
+        f"🎰 {label}<code>{toto_nums(nums)}</code>\n🔥 Most drawn so far: {toto_nums(hot)}\n"
         "<i>Built from how often each number came up before. It gives no edge.</i>",
     ])
 
 
 def _tg_message2(ctx: Context, level: int) -> list[str]:
     blocks = _tg_next_draw(ctx, level)
+    buy = _tg_buy(ctx)
+    if buy:
+        blocks += [DIVIDER, buy]
     big = _tg_big_prize(ctx, level)
     if big:
         blocks += [DIVIDER, big]

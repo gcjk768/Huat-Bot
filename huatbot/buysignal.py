@@ -113,6 +113,26 @@ def toto_ev_per_dollar(jackpot: float, boards: float, rules: PrizeRules, draw_ty
     return {k: float(v) for k, v in out.items()}
 
 
+# How much to buy
+
+SPEND_SHARE = {"HIGH": 1.0, "MEDIUM": 0.5, "LOW": 0.0}  # share of max_spend_per_draw per signal
+
+
+def how_much_to_buy(label: str | None, cap: float) -> tuple[int, int | None, int]:
+    """(dollars, System n or None, Ordinary boards) for the next draw, never above ``cap``.
+
+    HIGH spends the cap, MEDIUM half of it, LOW a single $1 board; a cap under $1 means nothing.
+    The biggest System bet that fits goes first, the rest are $1 Ordinary boards. Every board costs
+    $1 and has the same odds either way: a System bet only keeps them on one set of numbers.
+    """
+    cap = int(cap)
+    if cap < 1:
+        return 0, None, 0
+    spend = min(cap, max(1, int(cap * SPEND_SHARE.get(str(label or "").upper(), 0.5))))
+    system = max((n for n, b in C.TOTO_SYSTEM_BOARDS.items() if b <= spend), default=None)
+    return spend, system, spend - (C.TOTO_SYSTEM_BOARDS[system] if system else 0)
+
+
 # Signal
 
 
