@@ -1,6 +1,6 @@
 ---
 tags: [active]
-updated: 2026-10-03
+updated: 2026-11-09
 ---
 # App Overview
 
@@ -10,7 +10,8 @@ Python 3.12, Docker (`docker-compose.yml`, `pull_policy: build`). Runs `python -
 - [[huatbot/scheduler.py]] — draw days (Mon/Thu), waits for the result, retries.
 - [[huatbot/runner.py]] — one run: fetch → tickets → outlook → notes → Telegram. Saves the messages for `/huat`.
 - [[huatbot/fetch.py]], [[huatbot/parse.py]], [[huatbot/http.py]] — Singapore Pools pages, rate limited.
-- [[huatbot/outlook.py]], [[huatbot/buysignal.py]], [[huatbot/sales.py]] — jackpot projection, return per $1.
+- [[huatbot/outlook.py]], [[huatbot/buysignal.py]], [[huatbot/sales.py]] — jackpot projection, return per $1, how much to buy (`how_much_to_buy`: spend by signal within `max_spend_per_draw`, System n + Ordinary boards).
+- [[huatbot/lucky.py]] — just for fun lucky numbers from past frequency (message 2), sized to the System bet.
 - [[huatbot/report.py]] — full report + 2 Telegram cards in the SG car tracker block style (`SECTION_TITLES`, one block per item, no `<pre>` tables, divider, notes last in an expandable blockquote).
 - [[huatbot/telegram.py]] — sendMessage (forum topic via `chat/-topic`), getUpdates, answerCallbackQuery.
 - [[huatbot/listener.py]] — `/huat`, `/huatnext`, `/huathelp` + 🔄/🔮 buttons; own topic only; whitelisted callbacks; no fetch or LLM.
